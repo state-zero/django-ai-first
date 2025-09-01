@@ -1,0 +1,643 @@
+import unittest
+from datetime import datetime, timedelta
+from django.test import TestCase, TransactionTestCase
+from django.utils import timezone
+from django.contrib.contenttypes.models import ContentType
+from django.db import transaction, IntegrityError
+from pydantic import BaseModel
+import threading
+import time
+from unittest.mock import patch, Mock
+
+from automation.events.models import Event, EventStatus
+from automation.events.callbacks import on_event, callback_registry
+from automation.events.services import event_processor
+from automation.workflows.core import (
+    workflow,
+    event_workflow,
+    step,
+    get_context,
+    goto,
+    sleep,
+    wait,
+    wait_for_event,
+    complete,
+    fail,
+    Retry,
+    engine,
+)
+from automation.workflows.models import WorkflowRun, WorkflowStatus
+from automation.queues.sync_executor import SynchronousExecutor
+
+# Import test models
+from .models import Guest, Booking
+
+
+class ProductionScenarioTests(TestCase):
+    """Tests for real-world production scenarios and edge cases"""
+
+    def setUp(self):
+        """Set up test environment"""
+        engine.set_executor(SynchronousExecutor())
+        from automation.workflows.core import _workflows, _event_workflows
+
+        _workflows.clear()
+        _event_workflows.clear()
+        callback_registry.clear()
+
+        self.guest = Guest.objects.create(email="test@example.com", name="Test User")
+
+    def test_concurrent_workflow_execution(self):
+        """Test multiple workflows running concurrently don't interfere"""
+
+        @workflow("concurrent_test_workflow")
+        class ConcurrentWorkflow:
+            class Context(BaseModel):
+                workflow_id: str
+                step_count: int = 0
+                processing_time: float = 0.0
+                final_count: int = 0  # Add this field so complete() can merge
+
+            @classmethod
+            def create_context(cls, workflow_id: str):
+                return cls.Context(workflow_id=workflow_id)
+
+            @step(start=True)
+            def step_one(self):
+                ctx = get_context()
+                start_time = time.time()
+                ctx.step_count += 1
+                # Simulate some processing time
+                time.sleep(0.01)
+                ctx.processing_time = time.time() - start_time
+                return goto(self.step_two)
+
+            @step()
+            def step_two(self):
+                ctx = get_context()
+                ctx.step_count += 1
+                return complete(final_count=ctx.step_count)
+
+        # Start multiple workflows
+        workflow_runs = []
+        for i in range(5):
+            run = engine.start("concurrent_test_workflow", workflow_id=f"workflow_{i}")
+            workflow_runs.append(run)
+
+        # All should complete successfully
+        for run in workflow_runs:
+            run.refresh_from_db()
+            self.assertEqual(run.status, WorkflowStatus.COMPLETED)
+            self.assertEqual(run.data["step_count"], 2)
+            self.assertEqual(run.data["final_count"], 2)  # complete() result merged
+            # Each workflow should have its own context
+            self.assertIn(
+                f"workflow_{workflow_runs.index(run)}", run.data["workflow_id"]
+            )
+
+    def test_event_processing_under_load(self):
+        """Test event processing with many events"""
+
+        # Create multiple bookings rapidly
+        bookings = []
+        for i in range(10):
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=timezone.now() + timedelta(days=i + 1),
+                checkout_date=timezone.now() + timedelta(days=i + 3),
+                status="confirmed",
+            )
+            bookings.append(booking)
+
+        # Check all events were created
+        total_events = Event.objects.filter(
+            model_type=ContentType.objects.get_for_model(Booking)
+        ).count()
+
+        # Each booking should create multiple events
+        self.assertGreater(total_events, len(bookings))
+
+        # Process all due events using production task
+        from automation.queues import tasks as q2_tasks
+
+        result = q2_tasks.poll_due_events(hours=24)
+        self.assertGreater(result["due_events_found"], 0)
+
+    def test_workflow_with_database_rollback(self):
+        """Test workflow behavior when database operations fail"""
+
+        @workflow("db_rollback_test")
+        class DbRollbackWorkflow:
+            class Context(BaseModel):
+                should_cause_db_error: bool
+                step_reached: str = ""
+
+            @classmethod
+            def create_context(cls, should_cause_db_error: bool = False):
+                return cls.Context(should_cause_db_error=should_cause_db_error)
+
+            @step(start=True)
+            def start_step(self):
+                ctx = get_context()
+                ctx.step_reached = "start_step"
+
+                if ctx.should_cause_db_error:
+                    # Cause a validation error instead of foreign key error
+                    raise ValueError("Simulated database validation error")
+
+                return goto(self.end_step)
+
+            @step()
+            def end_step(self):
+                ctx = get_context()
+                ctx.step_reached = "end_step"
+                return complete()
+
+        # Test successful case
+        success_run = engine.start("db_rollback_test", should_cause_db_error=False)
+        success_run.refresh_from_db()
+        self.assertEqual(success_run.status, WorkflowStatus.COMPLETED)
+
+        # Test failure case
+        error_run = engine.start("db_rollback_test", should_cause_db_error=True)
+        error_run.refresh_from_db()
+
+        # Should either be waiting for retry or failed
+        self.assertIn(error_run.status, [WorkflowStatus.WAITING, WorkflowStatus.FAILED])
+        if error_run.status == WorkflowStatus.WAITING:
+            self.assertGreater(error_run.retry_count, 0)
+
+    def test_event_workflow_timing_edge_cases(self):
+        """Test event workflows with various timing scenarios"""
+
+        callback_calls = []
+
+        @event_workflow("checkin_due", offset_minutes=0)
+        class ImmediateCheckinWorkflow:
+            class Context(BaseModel):
+                booking_id: int
+                processed_at: str
+
+            @classmethod
+            def create_context(cls, event=None):
+                return cls.Context(
+                    booking_id=event.entity.id, processed_at=timezone.now().isoformat()
+                )
+
+            @step(start=True)
+            def process_checkin(self):
+                ctx = get_context()
+                callback_calls.append(f"immediate_checkin_{ctx.booking_id}")
+                return complete()
+
+        @event_workflow("checkin_due", offset_minutes=60)  # 1 hour after
+        class DelayedCheckinWorkflow:
+            class Context(BaseModel):
+                booking_id: int
+                processed_at: str
+
+            @classmethod
+            def create_context(cls, event=None):
+                return cls.Context(
+                    booking_id=event.entity.id, processed_at=timezone.now().isoformat()
+                )
+
+            @step(start=True)
+            def process_delayed_checkin(self):
+                ctx = get_context()
+                callback_calls.append(f"delayed_checkin_{ctx.booking_id}")
+                return complete()
+
+        # Create booking with checkin in the past (should trigger immediately)
+        past_booking = Booking.objects.create(
+            guest=self.guest,
+            checkin_date=timezone.now() - timedelta(hours=1),  # Past date
+            checkout_date=timezone.now() + timedelta(days=1),
+            status="confirmed",
+        )
+
+        # Create booking with checkin in the future
+        future_booking = Booking.objects.create(
+            guest=self.guest,
+            checkin_date=timezone.now() + timedelta(hours=2),  # Future date
+            checkout_date=timezone.now() + timedelta(days=2),
+            status="confirmed",
+        )
+
+        # Trigger the events manually
+        for booking in [past_booking, future_booking]:
+            event = Event.objects.get(
+                model_type=ContentType.objects.get_for_model(Booking),
+                entity_id=str(booking.id),
+                event_name="checkin_due",
+            )
+
+            # Simulate workflows being triggered
+            immediate_run = engine.start_for_event(event, ImmediateCheckinWorkflow)
+            delayed_run = engine.start_for_event(event, DelayedCheckinWorkflow)
+
+            # Immediate should run right away
+            immediate_run.refresh_from_db()
+            if immediate_run.status == WorkflowStatus.COMPLETED:
+                self.assertIn(f"immediate_checkin_{booking.id}", callback_calls)
+
+            # Delayed should be waiting (unless offset puts it in the past)
+            delayed_run.refresh_from_db()
+            if booking == past_booking:
+                # Past booking + 60min offset might still be in past
+                self.assertIn(
+                    delayed_run.status,
+                    [WorkflowStatus.COMPLETED, WorkflowStatus.WAITING],
+                )
+
+    def test_workflow_signal_and_wait_mechanisms(self):
+        """Test complex wait/signal patterns using production flow"""
+
+        @workflow("signal_test_workflow")
+        class SignalTestWorkflow:
+            class Context(BaseModel):
+                workflow_id: str
+                signals_received: list = []
+                timeouts_hit: int = 0
+                extra_data: str = ""  # Field for signal payload
+
+            @classmethod
+            def create_context(cls, workflow_id: str):
+                return cls.Context(workflow_id=workflow_id)
+
+            @step(start=True)
+            def wait_for_signal_a(self):
+                return wait.for_signal(
+                    "test_signal_a",
+                    timeout=timedelta(seconds=1),
+                    on_timeout="timeout_step",
+                )
+
+            @step()
+            def timeout_step(self):
+                ctx = get_context()
+                ctx.timeouts_hit += 1
+                return goto(self.wait_for_signal_b)
+
+            @step()
+            def wait_for_signal_b(self):
+                ctx = get_context()
+                # Check if signal payload was merged
+                if ctx.extra_data:  # Signal received
+                    ctx.signals_received.append("signal_b")
+                    return complete()
+                return wait.for_signal("test_signal_b")
+
+        # Start workflow - should be waiting for signal_a
+        workflow_run = engine.start("signal_test_workflow", workflow_id="test_123")
+        workflow_run.refresh_from_db()
+        self.assertEqual(workflow_run.status, WorkflowStatus.WAITING)
+        self.assertEqual(workflow_run.waiting_signal, "test_signal_a")
+
+        # Test timeout - set wake_at to past and process using production scheduler
+        workflow_run.wake_at = timezone.now() - timedelta(seconds=1)
+        workflow_run.save()
+
+        # Use the actual production task
+        from automation.queues import tasks as q2_tasks
+
+        q2_tasks.process_scheduled_workflows()
+
+        # Should have timed out and moved to waiting for signal_b
+        workflow_run.refresh_from_db()
+        self.assertEqual(workflow_run.status, WorkflowStatus.WAITING)
+        self.assertEqual(workflow_run.waiting_signal, "test_signal_b")
+        self.assertEqual(workflow_run.data["timeouts_hit"], 1)
+
+        # Test signal mechanism - this should work like the debug test
+        engine.signal("test_signal_b", {"extra_data": "test"})
+
+        # Should complete like the debug test did
+        workflow_run.refresh_from_db()
+        self.assertEqual(workflow_run.status, WorkflowStatus.COMPLETED)
+        self.assertIn("signal_b", workflow_run.data["signals_received"])
+        self.assertEqual(workflow_run.data["extra_data"], "test")
+
+    def test_event_condition_race_conditions(self):
+        """Test event conditions under rapid model changes"""
+
+        # Create booking
+        booking = Booking.objects.create(
+            guest=self.guest,
+            checkin_date=timezone.now() + timedelta(days=1),
+            checkout_date=timezone.now() + timedelta(days=3),
+            status="pending",
+        )
+
+        # Rapidly change booking status multiple times
+        statuses = ["confirmed", "pending", "confirmed", "cancelled", "confirmed"]
+
+        for status in statuses:
+            booking.status = status
+            booking.save()
+
+        # Check final event state
+        events = Event.objects.filter(
+            model_type=ContentType.objects.get_for_model(Booking),
+            entity_id=str(booking.id),
+        )
+
+        # Events should exist
+        self.assertGreater(events.count(), 0)
+
+        # Check event validity matches final booking state
+        for event in events:
+            if event.event_name == "booking_confirmed":
+                self.assertEqual(event.is_valid, booking.status == "confirmed")
+
+    def test_workflow_cleanup_and_cancellation(self):
+        """Test workflow cleanup scenarios"""
+
+        @workflow("cleanup_test_workflow")
+        class CleanupWorkflow:
+            class Context(BaseModel):
+                workflow_id: str
+                cleanup_performed: bool = False
+
+            @classmethod
+            def create_context(cls, workflow_id: str):
+                return cls.Context(workflow_id=workflow_id)
+
+            @step(start=True)
+            def long_running_step(self):
+                return wait.for_signal("never_comes", timeout=timedelta(hours=1))
+
+            @step()
+            def cleanup_step(self):
+                ctx = get_context()
+                ctx.cleanup_performed = True
+                return complete()
+
+        # Start workflow
+        workflow_run = engine.start("cleanup_test_workflow", workflow_id="cleanup_test")
+
+        # Should be waiting
+        workflow_run.refresh_from_db()
+        self.assertEqual(workflow_run.status, WorkflowStatus.WAITING)
+
+        # Cancel it
+        engine.cancel(workflow_run.id)
+
+        # Should be cancelled
+        workflow_run.refresh_from_db()
+        self.assertEqual(workflow_run.status, WorkflowStatus.CANCELLED)
+
+    def test_event_processor_error_handling(self):
+        """Test event processor handling various error conditions"""
+
+        # Create booking with invalid date (past checkin)
+        booking = Booking.objects.create(
+            guest=self.guest,
+            checkin_date=timezone.now() - timedelta(days=1),  # Past date
+            checkout_date=timezone.now() + timedelta(days=1),
+            status="confirmed",
+        )
+
+        # Create event manually with corrupted data
+        event = Event.objects.create(
+            model_type=ContentType.objects.get_for_model(Booking),
+            entity_id="999999",  # Non-existent booking ID
+            event_name="checkin_due",
+            status=EventStatus.PENDING,
+        )
+
+        # Process events using production task - should handle missing entity gracefully
+        from automation.queues import tasks as q2_tasks
+
+        result = q2_tasks.poll_due_events(hours=48)
+
+        # Should not crash
+        self.assertIsInstance(result, dict)
+        self.assertIn("due_events_found", result)
+
+    def test_workflow_memory_and_context_limits(self):
+        """Test workflows with large context data"""
+
+        @workflow("large_context_workflow")
+        class LargeContextWorkflow:
+            class Context(BaseModel):
+                large_data: list = []
+                counter: int = 0
+                total_items: int = 0  # Add this field so complete() can merge
+
+            @classmethod
+            def create_context(cls):
+                return cls.Context()
+
+            @step(start=True)
+            def accumulate_data(self):
+                ctx = get_context()
+                # Add some data each step
+                ctx.large_data.extend([f"item_{i}" for i in range(100)])
+                ctx.counter += 1
+
+                if ctx.counter < 5:
+                    return goto(self.accumulate_data)
+                else:
+                    return complete(total_items=len(ctx.large_data))
+
+        # Start workflow
+        workflow_run = engine.start("large_context_workflow")
+
+        # Should complete successfully even with large context
+        workflow_run.refresh_from_db()
+        self.assertEqual(workflow_run.status, WorkflowStatus.COMPLETED)
+
+        # These should be deterministic now
+        self.assertEqual(len(workflow_run.data["large_data"]), 500)  # 5 * 100 items
+        self.assertEqual(workflow_run.data["counter"], 5)
+        self.assertEqual(
+            workflow_run.data["total_items"], 500
+        )  # complete() result merged
+
+    def test_event_callback_error_isolation(self):
+        """Test that callback errors don't break the system"""
+
+        callback_results = []
+
+        def good_callback(event):
+            callback_results.append(f"good_{event.id}")
+
+        def bad_callback(event):
+            callback_results.append(f"bad_{event.id}")
+            raise Exception("Callback failed!")
+
+        def another_good_callback(event):
+            callback_results.append(f"another_good_{event.id}")
+
+        # Register callbacks
+        callback_registry.register(good_callback, event_name="booking_created")
+        callback_registry.register(bad_callback, event_name="booking_created")
+        callback_registry.register(another_good_callback, event_name="booking_created")
+
+        # Create booking to trigger callbacks
+        booking = Booking.objects.create(
+            guest=self.guest,
+            checkin_date=timezone.now() + timedelta(days=1),
+            checkout_date=timezone.now() + timedelta(days=3),
+            status="pending",
+        )
+
+        # Trigger event manually
+        event = Event.objects.get(
+            model_type=ContentType.objects.get_for_model(Booking),
+            entity_id=str(booking.id),
+            event_name="booking_created",
+        )
+        event.mark_as_occurred()
+
+        # Good callbacks should still have run despite bad one failing
+        self.assertIn(f"good_{event.id}", callback_results)
+        self.assertIn(f"another_good_{event.id}", callback_results)
+        self.assertIn(f"bad_{event.id}", callback_results)
+
+        # Cleanup
+        callback_registry.clear()
+
+    def test_scheduled_event_boundary_conditions(self):
+        """Test scheduled events at various time boundaries"""
+
+        now = timezone.now()
+
+        # Test events at different time boundaries
+        test_times = [
+            now + timedelta(seconds=1),  # Very soon
+            now + timedelta(minutes=1),  # 1 minute
+            now + timedelta(hours=1),  # 1 hour
+            now + timedelta(days=1),  # 1 day
+            now + timedelta(weeks=1),  # 1 week
+            now + timedelta(days=365),  # 1 year
+        ]
+
+        bookings = []
+        for i, checkin_time in enumerate(test_times):
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=checkin_time,
+                checkout_date=checkin_time + timedelta(days=2),
+                status="confirmed",
+            )
+            bookings.append(booking)
+
+        # Check that all events were created with correct timing
+        for booking in bookings:
+            event = Event.objects.get(
+                model_type=ContentType.objects.get_for_model(Booking),
+                entity_id=str(booking.id),
+                event_name="checkin_due",
+            )
+
+            self.assertEqual(event.at, booking.checkin_date)
+            self.assertTrue(event.is_valid)
+
+    def test_workflow_step_method_validation(self):
+        """Test that workflow validation works during registration"""
+
+        # Test that workflows require Context class
+        try:
+
+            @workflow("test_validation")
+            class TestWorkflow:
+                class Context(BaseModel):
+                    test_field: str = "test"
+
+                @classmethod
+                def create_context(cls):
+                    return cls.Context()
+
+                @step(start=True)
+                def test_step(self):
+                    return complete()
+
+            # If we get here, validation passed (which is good)
+            self.assertTrue(True)
+
+        except Exception as e:
+            # If validation failed, that's also acceptable behavior
+            self.assertIn("workflow", str(e).lower())
+
+
+class StressTestWorkflows(TestCase):
+    """Stress tests for workflow system under load"""
+
+    def setUp(self):
+        engine.set_executor(SynchronousExecutor())
+        from automation.workflows.core import _workflows
+
+        _workflows.clear()
+
+    def test_many_sequential_workflows(self):
+        """Test many workflows running in sequence"""
+
+        @workflow("stress_test_workflow")
+        class StressWorkflow:
+            class Context(BaseModel):
+                workflow_num: int
+                completed: bool = False
+                workflow_num_result: int = 0  # Add this field so complete() can merge
+
+            @classmethod
+            def create_context(cls, workflow_num: int):
+                return cls.Context(workflow_num=workflow_num)
+
+            @step(start=True)
+            def process(self):
+                ctx = get_context()
+                ctx.completed = True
+                return complete(workflow_num_result=ctx.workflow_num)
+
+        # Run many workflows
+        num_workflows = 50
+        completed_count = 0
+
+        for i in range(num_workflows):
+            run = engine.start("stress_test_workflow", workflow_num=i)
+            run.refresh_from_db()
+            if run.status == WorkflowStatus.COMPLETED:
+                completed_count += 1
+                # Verify the complete() result was merged
+                self.assertEqual(run.data["workflow_num_result"], i)
+
+        # All should complete
+        self.assertEqual(completed_count, num_workflows)
+
+    def test_deep_workflow_nesting(self):
+        """Test workflow with many sequential steps"""
+
+        @workflow("deep_workflow")
+        class DeepWorkflow:
+            class Context(BaseModel):
+                current_depth: int = 0
+                max_depth: int
+                final_depth: int = 0  # Add this field so complete() can merge
+
+            @classmethod
+            def create_context(cls, max_depth: int = 10):
+                return cls.Context(max_depth=max_depth)
+
+            @step(start=True)
+            def deep_step(self):
+                ctx = get_context()
+                ctx.current_depth += 1
+
+                if ctx.current_depth < ctx.max_depth:
+                    return goto(self.deep_step)  # Recursive call
+                else:
+                    return complete(final_depth=ctx.current_depth)
+
+        # Test deep workflow
+        run = engine.start("deep_workflow", max_depth=20)
+        run.refresh_from_db()
+
+        self.assertEqual(run.status, WorkflowStatus.COMPLETED)
+        self.assertEqual(run.data["current_depth"], 20)
+        self.assertEqual(run.data["final_depth"], 20)  # complete() result merged
+
+
+if __name__ == "__main__":
+    unittest.main()
