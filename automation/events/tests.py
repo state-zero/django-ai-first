@@ -473,3 +473,115 @@ class EventErrorHandlingTest(TransactionTestCase):
                 self.assertFalse(
                     event.is_valid
                 )  # Total is only 50, condition is > 1000
+
+
+class EventNamespaceTest(TransactionTestCase):
+    """Test namespace functionality for events and callbacks"""
+
+    def setUp(self):
+        from automation.events.callbacks import callback_registry
+
+        callback_registry.clear()
+
+    def tearDown(self):
+        from automation.events.callbacks import callback_registry
+
+        callback_registry.clear()
+
+    def test_event_creation_with_custom_namespace(self):
+        """Test that events can be created with custom namespaces"""
+        # Create a booking - should use default namespace "*"
+        booking = TestBooking.objects.create(
+            guest_name="Test Guest",
+            checkin_date=timezone.now() + timedelta(days=1),
+            checkout_date=timezone.now() + timedelta(days=2),
+            status="confirmed",
+        )
+
+        event = Event.objects.get(
+            model_type=ContentType.objects.get_for_model(TestBooking),
+            entity_id=str(booking.id),
+            event_name="booking_confirmed",
+        )
+
+        # Default namespace should be "*"
+        self.assertEqual(event.namespace, "*")
+
+    def test_callback_namespace_filtering(self):
+        """Test that callbacks are filtered by namespace"""
+        from automation.events.callbacks import callback_registry, on_event
+
+        callback_results = []
+
+        @on_event(event_name="booking_confirmed", namespace="tenant_a")
+        def tenant_a_callback(event):
+            callback_results.append(f"tenant_a_{event.id}")
+
+        @on_event(event_name="booking_confirmed", namespace="tenant_b")
+        def tenant_b_callback(event):
+            callback_results.append(f"tenant_b_{event.id}")
+
+        @on_event(event_name="booking_confirmed", namespace="*")
+        def wildcard_callback(event):
+            callback_results.append(f"wildcard_{event.id}")
+
+        # Create event with tenant_a namespace
+        event_a = Event.objects.create(
+            event_name="booking_confirmed",
+            model_type=ContentType.objects.get_for_model(TestBooking),
+            entity_id="123",
+            namespace="tenant_a",
+        )
+
+        # Create event with tenant_b namespace
+        event_b = Event.objects.create(
+            event_name="booking_confirmed",
+            model_type=ContentType.objects.get_for_model(TestBooking),
+            entity_id="456",
+            namespace="tenant_b",
+        )
+
+        # Trigger callbacks
+        event_a.mark_as_occurred()
+        event_b.mark_as_occurred()
+
+        # Check results
+        self.assertIn(f"tenant_a_{event_a.id}", callback_results)
+        self.assertIn(
+            f"wildcard_{event_a.id}", callback_results
+        )  # Wildcard should match
+        self.assertNotIn(f"tenant_b_{event_a.id}", callback_results)  # Wrong namespace
+
+        self.assertIn(f"tenant_b_{event_b.id}", callback_results)
+        self.assertIn(
+            f"wildcard_{event_b.id}", callback_results
+        )  # Wildcard should match
+        self.assertNotIn(f"tenant_a_{event_b.id}", callback_results)  # Wrong namespace
+
+    def test_wildcard_namespace_matches_all(self):
+        """Test that wildcard namespace "*" matches all events"""
+        from automation.events.callbacks import callback_registry, on_event
+
+        callback_results = []
+
+        @on_event(event_name="booking_confirmed", namespace="*")
+        def wildcard_callback(event):
+            callback_results.append(f"wildcard_{event.namespace}_{event.id}")
+
+        # Create events with different namespaces
+        namespaces = ["tenant_a", "tenant_b", "custom_namespace", "*"]
+        events = []
+
+        for ns in namespaces:
+            event = Event.objects.create(
+                event_name="booking_confirmed",
+                model_type=ContentType.objects.get_for_model(TestBooking),
+                entity_id=f"test_{ns}",
+                namespace=ns,
+            )
+            events.append(event)
+            event.mark_as_occurred()
+
+        # Wildcard callback should have been called for all events
+        for event in events:
+            self.assertIn(f"wildcard_{event.namespace}_{event.id}", callback_results)

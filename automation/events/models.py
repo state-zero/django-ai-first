@@ -217,7 +217,7 @@ class Event(models.Model):
             models.Index(fields=["status"]),
             models.Index(fields=["model_type", "entity_id"]),
         ]
-        unique_together = ["model_type", "entity_id", "event_name"]
+        unique_together = ["model_type", "entity_id", "event_name", "namespace"]
 
     def __str__(self) -> str:
         return f"{self.event_name} at {self.at} for {self.model_type.model} {self.entity_id}"
