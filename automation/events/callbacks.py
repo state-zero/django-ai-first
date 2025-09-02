@@ -1,5 +1,6 @@
 from typing import Callable, Dict, List, Any, Protocol
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import uuid
 from enum import Enum
 import logging
 
@@ -30,13 +31,15 @@ class CallbackRegistration:
     event_name: str = "*"  # Specific event name or "*" for all
     entity_type: str = "*"  # Specific entity type or "*" for all
     phase: EventPhase = EventPhase.OCCURRED
+    namespace: str = "*" # Specific event namespace or "*" for all
+    _id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
 class EventCallbackRegistry:
     """Registry for event callbacks with filtering"""
 
     def __init__(self):
-        self._callbacks: List[CallbackRegistration] = []
+        self._callbacks: Dict[int, CallbackRegistration] = {}
         self._enabled = True
 
     def register(
@@ -44,23 +47,27 @@ class EventCallbackRegistry:
         callback: EventCallback,
         event_name: str = "*",
         entity_type: str = "*",
+        namespace: str = "*",
         phase: EventPhase = EventPhase.OCCURRED,
     ) -> None:
         """Register a callback for events"""
+        callback_id: int = id(callback)
         registration = CallbackRegistration(
             callback=callback,
             event_name=event_name,
             entity_type=entity_type,
+            namespace=namespace,
             phase=phase,
         )
 
-        self._callbacks.append(registration)
+        self._callbacks[callback_id] = registration
 
     def unregister(self, callback: EventCallback) -> bool:
-        """Remove a callback from registry"""
-        original_len = len(self._callbacks)
-        self._callbacks = [reg for reg in self._callbacks if reg.callback != callback]
-        return len(self._callbacks) != original_len
+        callback_id = id(callback)
+        if callback_id in self._callbacks:
+            del self._callbacks[callback_id]
+            return True
+        return False
 
     def notify(self, event: "Event", phase: EventPhase) -> None:
         """Notify all matching callbacks about an event"""
@@ -71,11 +78,12 @@ class EventCallbackRegistry:
 
         # Find matching callbacks
         matching = []
-        for reg in self._callbacks:
+        for reg in self._callbacks.values():
             if (
                 reg.phase == phase
                 and (reg.event_name == "*" or reg.event_name == event.event_name)
                 and (reg.entity_type == "*" or reg.entity_type == entity_type)
+                and (reg.namespace == "*" or reg.namespace == event.namespace)
             ):
                 matching.append(reg)
 
@@ -122,25 +130,26 @@ callback_registry = EventCallbackRegistry()
 def on_event_base(
     event_name: str = "*",
     entity_type: str = "*",
+    namespace: str = "*",
     phase: EventPhase = EventPhase.OCCURRED,
 ):
     """Base decorator to register event callbacks"""
 
-    def decorator(func: Callable[["Event", EventPhase], None]):
-        callback_registry.register(func, event_name, entity_type, phase)
+    def decorator(func: Callable[["Event"], None]):
+        callback_registry.register(func, event_name, entity_type, namespace, phase)
         return func
 
     return decorator
 
 
-def on_event_created(event_name="*", entity_type="*"):
-    return on_event_base(event_name, entity_type, EventPhase.CREATED)
+def on_event_created(event_name: str = "*", entity_type: str = "*", namespace: str = "*"):
+    return on_event_base(event_name, entity_type, namespace, EventPhase.CREATED)
 
 
-def on_event(event_name: str = "*", entity_type: str = "*"):
+def on_event(event_name: str = "*", entity_type: str = "*", namespace: str = "*"):
     """Decorator for when events occur (default behavior)"""
-    return on_event_base(event_name, entity_type, EventPhase.OCCURRED)
+    return on_event_base(event_name, entity_type, namespace, EventPhase.OCCURRED)
 
 
-def on_event_cancelled(event_name="*", entity_type="*"):
-    return on_event_base(event_name, entity_type, EventPhase.CANCELLED)
+def on_event_cancelled(event_name: str = "*", entity_type: str = "*", namespace: str = "*"):
+    return on_event_base(event_name, entity_type, namespace, EventPhase.CANCELLED)

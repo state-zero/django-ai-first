@@ -161,6 +161,7 @@ class EventManager(models.Manager):
                 model_type=content_type,
                 entity_id=str(instance.pk),
                 event_name=event_def.name,
+                namespace=event_def.get_namespace(instance)
             )
 
             # Fire immediate events right after the entity commit if valid & pending
@@ -202,6 +203,12 @@ class Event(models.Model):
 
     event_created_at: datetime = models.DateTimeField(auto_now_add=True)
     event_updated_at: datetime = models.DateTimeField(auto_now=True)
+
+    namespace = models.CharField(
+        max_length=255,
+        default="*",
+        help_text="Namespace to scope events and prevent cross-application triggering",
+    )
 
     objects: EventManager = EventManager()
 
@@ -296,7 +303,7 @@ class Event(models.Model):
         except Exception:
             return False
 
-    def _get_event_definition(self) -> Optional["EventDefinition"]:
+    def _get_event_definition(self) -> Optional[EventDefinition]:
         """Find the EventDefinition that created this event"""
         try:
             entity = self.entity
