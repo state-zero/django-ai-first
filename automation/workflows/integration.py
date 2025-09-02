@@ -30,7 +30,6 @@ def handle_event_for_workflows(event: Event) -> None:
             "event_id": event.id,
             "event_name": event.event_name,
             "entity_id": event.entity_id,
-            "entity_type": event.model_type.model,
             "event_at": event.at,
         }
 

@@ -29,7 +29,6 @@ class CallbackRegistration:
 
     callback: EventCallback
     event_name: str = "*"  # Specific event name or "*" for all
-    entity_type: str = "*"  # Specific entity type or "*" for all
     phase: EventPhase = EventPhase.OCCURRED
     namespace: str = "*" # Specific event namespace or "*" for all
     _id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -46,7 +45,6 @@ class EventCallbackRegistry:
         self,
         callback: EventCallback,
         event_name: str = "*",
-        entity_type: str = "*",
         namespace: str = "*",
         phase: EventPhase = EventPhase.OCCURRED,
     ) -> None:
@@ -55,7 +53,6 @@ class EventCallbackRegistry:
         registration = CallbackRegistration(
             callback=callback,
             event_name=event_name,
-            entity_type=entity_type,
             namespace=namespace,
             phase=phase,
         )
@@ -74,15 +71,12 @@ class EventCallbackRegistry:
         if not self._enabled:
             return
 
-        entity_type = event.model_type.model
-
         # Find matching callbacks
         matching = []
         for reg in self._callbacks.values():
             if (
                 reg.phase == phase
                 and (reg.event_name == "*" or reg.event_name == event.event_name)
-                and (reg.entity_type == "*" or reg.entity_type == entity_type)
                 and (reg.namespace == "*" or reg.namespace == event.namespace)
             ):
                 matching.append(reg)
@@ -115,7 +109,6 @@ class EventCallbackRegistry:
             {
                 "callback": str(reg.callback),
                 "event_name": reg.event_name,
-                "entity_type": reg.entity_type,
                 "phase": reg.phase.value,
             }
             for reg in self._callbacks
@@ -129,27 +122,26 @@ callback_registry = EventCallbackRegistry()
 # Convenience decorators
 def on_event_base(
     event_name: str = "*",
-    entity_type: str = "*",
     namespace: str = "*",
     phase: EventPhase = EventPhase.OCCURRED,
 ):
     """Base decorator to register event callbacks"""
 
     def decorator(func: Callable[["Event"], None]):
-        callback_registry.register(func, event_name, entity_type, namespace, phase)
+        callback_registry.register(func, event_name, namespace, phase)
         return func
 
     return decorator
 
 
-def on_event_created(event_name: str = "*", entity_type: str = "*", namespace: str = "*"):
-    return on_event_base(event_name, entity_type, namespace, EventPhase.CREATED)
+def on_event_created(event_name: str = "*", namespace: str = "*"):
+    return on_event_base(event_name, namespace, EventPhase.CREATED)
 
 
-def on_event(event_name: str = "*", entity_type: str = "*", namespace: str = "*"):
+def on_event(event_name: str = "*", namespace: str = "*"):
     """Decorator for when events occur (default behavior)"""
-    return on_event_base(event_name, entity_type, namespace, EventPhase.OCCURRED)
+    return on_event_base(event_name, namespace, EventPhase.OCCURRED)
 
 
-def on_event_cancelled(event_name: str = "*", entity_type: str = "*", namespace: str = "*"):
-    return on_event_base(event_name, entity_type, namespace, EventPhase.CANCELLED)
+def on_event_cancelled(event_name: str = "*", namespace: str = "*"):
+    return on_event_base(event_name, namespace, EventPhase.CANCELLED)

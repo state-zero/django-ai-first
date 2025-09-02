@@ -56,7 +56,7 @@ For a one-off action when an event occurs—no workflow needed.
 from automation.events.callbacks import on_event
 from automation.events.models import Event
 
-@on_event(event_name="reservation_confirmed")  # entity_type optional; omit unless you want to filter
+@on_event(event_name="reservation_confirmed")
 def send_welcome_email(event: Event) -> None:
     reservation = event.entity  # fetches the Reservation instance
     # do side-effect: email/webhook/etc.
@@ -233,7 +233,6 @@ engine.start("reindex_listing", listing_id=123)
 
 * **Immediate events + poller**: the poller considers recent immediate events by creation time window and doesn’t re-check `is_valid`. If you want stricter behavior, tighten `EventProcessor.process_due_events` to require `event.is_valid` for immediate events too.
 * **Context merge on signal**: payload keys only merge if they exist on your `Context`.
-* **`entity_type`** in decorators is optional (defaults to `"*"`). Omit it unless you need to filter.
 * **Use `event.entity`** in callbacks and `create_context`.
 
 ---

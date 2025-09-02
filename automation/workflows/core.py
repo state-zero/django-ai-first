@@ -216,7 +216,6 @@ def workflow(name: str, version: str = "1", default_retry: Optional[Retry] = Non
 
 def event_workflow(
     event_name: str,
-    entity_type: str = "*",
     offset_minutes: int = 0,
     version: str = "1",
     default_retry: Optional[Retry] = None,
@@ -267,14 +266,13 @@ def event_workflow(
             raise ValueError(f"Event workflow must have a start step")
 
         # Generate unique workflow name
-        workflow_name = f"event:{event_name}:{entity_type}:{offset_minutes}"
+        workflow_name = f"event:{event_name}:{offset_minutes}"
 
         cls._workflow_name = workflow_name
         cls._workflow_version = version
         cls._default_retry = default_retry or Retry()
         cls._start_step = start_step
         cls._event_name = event_name
-        cls._entity_type = entity_type
         cls._offset_minutes = offset_minutes
 
         # Register in both places
@@ -381,13 +379,6 @@ class WorkflowEngine:
         workflows_started = []
 
         for workflow_cls in _event_workflows[event.event_name]:
-            # Check entity type filter
-            if (
-                workflow_cls._entity_type != "*"
-                and workflow_cls._entity_type != event.model_type.model
-            ):
-                continue
-
             # Check if workflow should run for this event
             if hasattr(workflow_cls, "should_run_for_event"):
                 if not workflow_cls.should_run_for_event(event):

@@ -36,7 +36,7 @@ class TestEndToEndIntegration(TransactionTestCase):
         callback_registry.clear()
         
         from automation.workflows.integration import handle_event_for_workflows
-        callback_registry.register(handle_event_for_workflows, event_name="*", entity_type="*", namespace="*")
+        callback_registry.register(handle_event_for_workflows, event_name="*", namespace="*")
 
         from pydantic import BaseModel
 
