@@ -29,9 +29,14 @@ class TestEndToEndIntegration(TransactionTestCase):
         engine.set_executor(SynchronousExecutor())
         # reset workflow registries
         from automation.workflows.core import _workflows, _event_workflows
+        from automation.events.callbacks import callback_registry
 
         _workflows.clear()
         _event_workflows.clear()
+        callback_registry.clear()
+        
+        from automation.workflows.integration import handle_event_for_workflows
+        callback_registry.register(handle_event_for_workflows, event_name="*", entity_type="*", namespace="*")
 
         from pydantic import BaseModel
 
@@ -169,7 +174,7 @@ class TestEndToEndIntegration(TransactionTestCase):
         run.refresh_from_db()
         self.assertEqual(run.status, WorkflowStatus.COMPLETED)
         self.assertTrue(run.data.get("woke"))
-        
+
     def test_immediate_event_with_false_condition_does_not_fire(self):
         obj = ITImmediate.objects.create(flag=False)
         ct = ContentType.objects.get_for_model(ITImmediate)
@@ -177,7 +182,6 @@ class TestEndToEndIntegration(TransactionTestCase):
 
         # Event row exists but should not be processed
         self.assertEqual(ev.status, EventStatus.PENDING)
-
 
     def test_scheduled_event_in_future_not_due_yet(self):
         future = timezone.now() + timedelta(hours=1)
@@ -235,7 +239,7 @@ class TestEndToEndIntegration(TransactionTestCase):
         for obj in objs:
             ev = Event.objects.get(entity_id=str(obj.pk))
             self.assertEqual(ev.status, EventStatus.PROCESSED)
-            
+
     def test_immediate_event_invalid_is_not_processed_by_poller(self):
         # Create an immediate event that is invalid (flag=False)
         obj = ITImmediate.objects.create(flag=False)
@@ -255,4 +259,3 @@ class TestEndToEndIntegration(TransactionTestCase):
         ev.refresh_from_db()
         # Should remain pending because is_valid is False
         self.assertEqual(ev.status, EventStatus.PENDING)
-
