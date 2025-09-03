@@ -13,6 +13,12 @@ def process_scheduled_workflows() -> dict:
     return {"processed_at": timezone.now().isoformat()}
 
 
+def process_scheduled_agents() -> dict:
+    with transaction.atomic():
+        engine.process_scheduled()
+    return {"processed_at": timezone.now().isoformat(), "kind": "agents"}
+
+
 def poll_due_events(hours: int = 24) -> dict:
     return event_processor.process_due_events(lookback_hours=hours)
 

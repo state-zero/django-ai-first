@@ -11,16 +11,15 @@ class SynchronousExecutor:
         from automation.workflows.core import engine
         from automation.events.services import event_processor
 
-        # Handle delay if specified
         if delay:
             time.sleep(delay.total_seconds())
 
-        # Route to appropriate handler - import at call time to avoid circular imports
         if task_name == "execute_step":
             run_id, step_name = args
-
             engine.execute_step(run_id, step_name)
         elif task_name == "process_scheduled_workflows":
+            engine.process_scheduled()
+        elif task_name == "process_scheduled_agents":
             engine.process_scheduled()
         elif task_name == "poll_due_events":
             hours = args[0] if args else 24

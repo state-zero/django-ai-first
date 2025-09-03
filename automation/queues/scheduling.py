@@ -16,6 +16,16 @@ def ensure_q2_schedules():
     )
 
     Schedule.objects.update_or_create(
+        name="Agents: process_scheduled",
+        defaults=dict(
+            func="pilot.automationqueues.tasks.process_scheduled_agents",
+            schedule_type=Schedule.MINUTES,
+            minutes=1,
+            repeats=-1,
+        ),
+    )
+
+    Schedule.objects.update_or_create(
         name="Events: poll_due",
         defaults=dict(
             func="pilot.automationqueues.tasks.poll_due_events",
