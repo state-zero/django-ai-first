@@ -19,6 +19,8 @@ from .definitions import EventDefinition
 from django.db import transaction
 import logging
 from collections import defaultdict
+from cytoolz import groupby, pipe
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -317,38 +319,38 @@ class Event(models.Model):
 
 
 class EventQuerySet(models.QuerySet):
+
     def with_entities(self):
-        """
-        Efficiently fetches related entities for the events in the queryset.
+        """Use cytoolz for memory-efficient processing"""
+        # Use iterator() instead of list() - stays lazy
+        events_iter = self.iterator()
 
-        This executes the primary query and then performs bulk queries to
-        pre-fetch and attach the related entity for each event, preventing
-        N+1 problems.
-        """
-        # The queryset (self) is still lazy at this point.
-        # Evaluating it turns it into a list of candidate events.
-        candidate_events = list(self)
+        # cytoolz groupby works with iterators efficiently
+        events_by_type = groupby(lambda ev: ev.model_type, events_iter)
 
-        if not candidate_events:
-            return []
-
-        # Group entity PKs by their model type
-        entities_to_fetch = defaultdict(set)
-        for ev in candidate_events:
-            entities_to_fetch[ev.model_type].add(ev.entity_id)
-
-        # Run one bulk query per model type
         entity_cache = {}
-        for content_type, pks in entities_to_fetch.items():
+        all_events = []
+
+        # Process each content type group
+        for content_type, events_group in events_by_type.items():
+            events_list = list(events_group)  # Only materialize per-type
+            all_events.extend(events_list)
+
+            # Get PKs for this type
+            pks = {ev.entity_id for ev in events_list}
+
+            # Bulk fetch entities
             model_class = content_type.model_class()
             fetched_entities = model_class.objects.filter(pk__in=pks)
+
+            # Cache entities
             for entity in fetched_entities:
                 entity_cache[(content_type.id, str(entity.pk))] = entity
 
-        # Attach the fetched entities back to the event instances
-        for ev in candidate_events:
+        # Attach cached entities
+        for ev in all_events:
             entity = entity_cache.get((ev.model_type_id, ev.entity_id))
             if entity:
                 ev._entity_cache = entity
 
-        return candidate_events
+        return all_events

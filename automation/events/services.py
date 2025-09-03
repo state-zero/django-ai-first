@@ -29,8 +29,15 @@ class EventProcessor:
         occurred_count = 0
         for event in due_events:
             try:
-                event.mark_as_occurred()
-                occurred_count += 1
+                # Use select_for_update to lock the event
+                locked_event = Event.objects.select_for_update(skip_locked=True).filter(
+                    id=event.id, 
+                    status=EventStatus.PENDING
+                ).first()
+                
+                if locked_event:
+                    locked_event.mark_as_occurred()
+                    occurred_count += 1
             except Exception as e:
                 logger.error(f"Failed to process event {event.id}: {e}")
 
