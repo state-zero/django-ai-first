@@ -3,7 +3,6 @@ from typing import Optional, List, Union
 from pydantic import BaseModel
 from django.utils import timezone
 from ..workflows.core import (
-    event_workflow,
     workflow,
     step,
     get_context,
@@ -41,6 +40,9 @@ def agent(
         if not hasattr(cls, "get_namespace"):
             raise ValueError(f"Agent must have a 'get_namespace' method")
 
+        # Store original agent class reference
+        original_agent_class = cls
+
         # Add agent context fields
         if hasattr(cls, "Context"):
             original_context = cls.Context
@@ -66,7 +68,7 @@ def agent(
 
         cls.finish = finish
 
-        # Convert to workflow (kept as-is)
+        # Convert to workflow
         @workflow(f"agent:{cls.__name__.lower()}")
         class AgentWorkflow:
             Context = AgentContext
@@ -76,12 +78,14 @@ def agent(
                 ctx_data = kwargs
                 if event:
                     # Create temporary agent instance to compute namespace(s)
-                    temp_agent = cls()
+                    temp_agent = original_agent_class()
                     agent_namespaces = temp_agent.get_namespace(event)
 
                     # Normalize to list
                     if isinstance(agent_namespaces, str):
                         agent_namespaces = [agent_namespaces]
+                    elif agent_namespaces is None:
+                        agent_namespaces = ["*"]  # Default fallback
 
                     ctx_data.update(
                         {
@@ -97,7 +101,7 @@ def agent(
             @step(start=True)
             def _run_agent(self):
                 # Create the actual agent instance and run it
-                agent_instance = cls()
+                agent_instance = original_agent_class()
                 return self._agent_loop(agent_instance)
 
             @step()
@@ -121,19 +125,19 @@ def agent(
                         # Hybrid: wait for act events OR heartbeat timeout
                         return wait_for_event(
                             (
-                                act_on[0] if len(act_on) == 1 else act_on
-                            ),  # Support multiple events
+                                act_on[0] if len(act_on) == 1 else act_on[0]
+                            ),  # First event for now
                             timeout=heartbeat,
-                            on_timeout=lambda: self._agent_loop(agent_instance),
+                            on_timeout=self._agent_loop.__name__,
                         )
                     elif act_on:
                         # Event-driven: wait for act events indefinitely
-                        return wait_for_event(act_on[0] if len(act_on) == 1 else act_on)
+                        return wait_for_event(
+                            act_on[0] if len(act_on) == 1 else act_on[0]
+                        )
                     elif heartbeat:
                         # Heartbeat-only: sleep then continue
-                        return sleep(heartbeat).then(
-                            lambda: self._agent_loop(agent_instance)
-                        )
+                        return sleep(heartbeat)
                     else:
                         # No strategy - agent runs once then finishes
                         return complete(reason="single_run_complete")
@@ -148,7 +152,7 @@ def agent(
                 event_name,
                 singleton,
                 is_spawn_event=True,
-                agent_class=cls,
+                agent_class=original_agent_class,
             )
 
         # Register act event handlers with namespace filtering
@@ -159,7 +163,7 @@ def agent(
                     event_name,
                     singleton,
                     is_spawn_event=False,
-                    agent_class=cls,
+                    agent_class=original_agent_class,
                 )
 
         return cls
@@ -187,6 +191,8 @@ def _register_spawner(
             # Normalize to list
             if isinstance(event_namespaces, str):
                 event_namespaces = [event_namespaces]
+            elif event_namespaces is None:
+                event_namespaces = ["*"]
         else:
             event_namespaces = ["*"]
 
@@ -205,7 +211,7 @@ def _register_spawner(
                     _wake_agent_with_event(existing, event)
                     return
 
-            # Spawn new agent via workflow engine (unchanged)
+            # Spawn new agent via workflow engine
             engine.start(workflow_name, event=event)
 
         else:
@@ -226,13 +232,16 @@ def _event_matches_agent_namespaces(event, agent_namespaces: List[str]) -> bool:
     return False
 
 
-# ⬇️ These functions now query AgentRun and its fields
+# Helper functions to work with WorkflowRun instead of AgentRun for now
 def _find_agent_in_namespaces(agent_name: str, namespaces: List[str]):
     """Find a single existing agent that operates in any of these namespaces"""
-    for run in AgentRun.objects.filter(
-        agent_name=agent_name, status__in=[AgentStatus.RUNNING, AgentStatus.WAITING]
+    from automation.workflows.models import WorkflowRun, WorkflowStatus
+
+    for run in WorkflowRun.objects.filter(
+        name=f"agent:{agent_name}",
+        status__in=[WorkflowStatus.RUNNING, WorkflowStatus.WAITING],
     ):
-        agent_namespaces = run.namespaces or []
+        agent_namespaces = run.data.get("agent_namespaces", [])
         # Check for overlap
         if any(ns in agent_namespaces for ns in namespaces):
             return run
@@ -241,33 +250,27 @@ def _find_agent_in_namespaces(agent_name: str, namespaces: List[str]):
 
 def _find_agents_in_namespaces(agent_name: str, namespaces: List[str]):
     """Find all existing agents that operate in any of these namespaces"""
+    from automation.workflows.models import WorkflowRun, WorkflowStatus
+
     matching_agents = []
-    for run in AgentRun.objects.filter(
-        agent_name=agent_name, status__in=[AgentStatus.RUNNING, AgentStatus.WAITING]
+    for run in WorkflowRun.objects.filter(
+        name=f"agent:{agent_name}",
+        status__in=[WorkflowStatus.RUNNING, WorkflowStatus.WAITING],
     ):
-        agent_namespaces = run.namespaces or []
+        agent_namespaces = run.data.get("agent_namespaces", [])
         if any(ns in agent_namespaces for ns in namespaces):
             matching_agents.append(run)
     return matching_agents
 
 
-def _wake_agent_with_event(agent_run: AgentRun, event):
+def _wake_agent_with_event(agent_run, event):
     """Wake an existing agent with new event data"""
     # Update agent context with new event info
-    ctx = agent_run.context_data or {}
+    ctx = agent_run.data or {}
     ctx["current_event_id"] = event.id
     ctx["current_event_name"] = event.event_name
-    agent_run.context_data = ctx
-    agent_run.current_event_id = event.id
-    agent_run.current_event_name = event.event_name
-    agent_run.save(
-        update_fields=[
-            "context_data",
-            "current_event_id",
-            "current_event_name",
-            "updated_at",
-        ]
-    )
+    agent_run.data = ctx
+    agent_run.save(update_fields=["data", "updated_at"])
 
     # Send signal to wake the backing workflow
     engine.signal(
@@ -299,42 +302,47 @@ class AgentManager:
     @staticmethod
     def finish_all(agent_class_name: str, namespace: Optional[str] = None):
         """Mark all instances of an agent type to finish, optionally filtered by namespace"""
-        # Query AgentRun, not WorkflowRun
-        active_runs = AgentRun.objects.filter(
-            agent_name=agent_class_name.lower(),
-            status__in=[AgentStatus.RUNNING, AgentStatus.WAITING],
+        from automation.workflows.models import WorkflowRun, WorkflowStatus
+
+        active_runs = WorkflowRun.objects.filter(
+            name=f"agent:{agent_class_name.lower()}",
+            status__in=[WorkflowStatus.RUNNING, WorkflowStatus.WAITING],
         )
 
         if namespace:
             active_runs = [
                 r
                 for r in active_runs
-                if (r.namespaces or []) and namespace in r.namespaces
+                if namespace in r.data.get("agent_namespaces", [])
             ]
 
         for run in active_runs:
-            ctx = run.context_data or {}
+            ctx = run.data or {}
             ctx["_should_finish"] = True
-            run.context_data = ctx
-            run.save(update_fields=["context_data", "updated_at"])
+            run.data = ctx
+            run.save(update_fields=["data", "updated_at"])
 
     @staticmethod
     def list_active(
         agent_class_name: Optional[str] = None, namespace: Optional[str] = None
     ):
         """List active agents, optionally filtered by type and namespace"""
-        filter_kwargs = {"status__in": [AgentStatus.RUNNING, AgentStatus.WAITING]}
+        from automation.workflows.models import WorkflowRun, WorkflowStatus
+
+        filter_kwargs = {"status__in": [WorkflowStatus.RUNNING, WorkflowStatus.WAITING]}
 
         if agent_class_name:
-            filter_kwargs["agent_name"] = agent_class_name.lower()
+            filter_kwargs["name"] = f"agent:{agent_class_name.lower()}"
+        else:
+            filter_kwargs["name__startswith"] = "agent:"
 
-        active_runs = AgentRun.objects.filter(**filter_kwargs)
+        active_runs = WorkflowRun.objects.filter(**filter_kwargs)
 
         if namespace:
             return [
                 r
                 for r in active_runs
-                if (r.namespaces or []) and namespace in r.namespaces
+                if namespace in r.data.get("agent_namespaces", [])
             ]
 
         return list(active_runs)

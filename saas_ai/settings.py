@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     'automation.events',
     'automation.queues',
     'automation.workflows',
+    'automation.agents',
     'tests'
 ]
 
