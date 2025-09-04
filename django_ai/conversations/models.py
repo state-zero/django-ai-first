@@ -14,7 +14,7 @@ import requests
 import base64
 from django.utils import timezone
 
-from .text_extractor import FileTextExtractor
+from .text_extractor import TikaTextExtractor
 
 User = get_user_model()
 
@@ -181,7 +181,7 @@ class File(models.Model):
                     temp_file.flush()
 
                     # Extract text
-                    extracted_text = FileTextExtractor.extract_text(
+                    extracted_text = TikaTextExtractor.extract_text(
                         temp_file.name, lang
                     )
 
