@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-ai-first"
-version = "0.1.0"
+version = "0.1.1"
 description = "Django framework for building AI-first applications with agents, conversations, and workflows"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [
-    {name = "Robert Herring", email = "robert@state-zero.ai"},
+    {name = "Robert Herring", email = "robert.herring@resipilot.com"},
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -21,15 +21,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
-dependencies = [
-    "Django>=5.1,<6.0",
-    "pydantic>=2.0,<3.0",
-    "django-q2>=1.4.0",
-    "cytoolz>=0.12.0",
-    "tika>=2.6.0",
-    "pusher>=3.3.0",
-    "requests>=2.25.0",
-]
+dynamic = ["dependencies"]
 
 [project.optional-dependencies]
 dev = [
@@ -46,7 +38,9 @@ dev = [
 "Bug Reports" = "https://github.com/state-zero/django-ai-first/issues"
 "Source" = "https://github.com/state-zero/django-ai-first"
 
-# Only include the main django_ai package (not test infrastructure)
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
 [tool.setuptools]
 packages = [
     "django_ai",
@@ -58,12 +52,11 @@ packages = [
     "django_ai.conversations",
 ]
 
-# Don't include example_project, tests, or saas_ai in the distributed package
 [tool.setuptools.package-data]
 "*" = ["*.html", "*.css", "*.js", "*.txt"]
 
 [tool.pytest.ini_options]
-DJANGO_SETTINGS_MODULE = "saas_ai.settings"
+DJANGO_SETTINGS_MODULE = "example_project.settings"
 python_files = ["tests.py", "test_*.py", "*_tests.py"]
 
 [tool.black]
