@@ -1,0 +1,120 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "django-ai-first"
+version = "0.1.0"
+description = "SaaS AI Automation System with Events, Workflows, Agents, and Conversations"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "your.email@example.com"},
+]
+keywords = ["django", "automation", "workflows", "ai", "events", "agents"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Framework :: Django",
+    "Framework :: Django :: 4.0",
+    "Framework :: Django :: 5.0",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Office/Business :: Financial :: Accounting",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+]
+
+dependencies = [
+    # Django core
+    "Django>=5.1,<6.0",
+    
+    # Data validation and serialization
+    "pydantic>=2.0,<3.0",
+    
+    # Queue system
+    "django-q2>=1.4.0",
+    
+    # Functional programming utilities
+    "cytoolz>=0.12.0",
+    
+    # Text extraction and processing
+    "tika>=2.6.0",
+    
+    # Real-time communication
+    "pusher>=3.3.0",
+    
+    # HTTP requests
+    "requests>=2.25.0",
+    
+    # Date/time utilities
+    "python-dateutil>=2.8.0",
+]
+
+[project.optional-dependencies]
+# Development dependencies
+dev = [
+    "pytest>=7.0.0",
+    "pytest-django>=4.5.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
+    "django-stubs>=4.2.0",
+]
+
+# Testing dependencies
+test = [
+    "pytest>=7.0.0",
+    "pytest-django>=4.5.0",
+    "pytest-cov>=4.0.0",
+    "factory-boy>=3.2.0",
+    "freezegun>=1.2.0",
+    "responses>=0.23.0",
+]
+
+# Documentation dependencies
+docs = [
+    "sphinx>=5.0.0",
+    "sphinx-rtd-theme>=1.2.0",
+    "sphinx-autodoc-typehints>=1.19.0",
+]
+
+# Production dependencies
+prod = [
+    "gunicorn>=20.1.0",
+    "psycopg2-binary>=2.9.0",
+    "redis>=4.5.0",
+    "celery>=5.2.0",
+    "django-redis>=5.2.0",
+]
+
+# All dependencies
+all = [
+    "saas-ai-automation[dev,test,docs,prod]"
+]
+
+[tool.setuptools]
+packages = [
+    "saas_ai",
+    "automation",
+    "automation.events",
+    "automation.workflows", 
+    "automation.queues",
+    "automation.agents",
+    "conversations",
+    "tests",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "saas_ai.settings"
+python_files = ["tests.py", "test_*.py", "*_tests.py"]
