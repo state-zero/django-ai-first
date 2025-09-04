@@ -9,10 +9,10 @@ import threading
 import time
 from unittest.mock import patch, Mock
 
-from automation.events.models import Event, EventStatus
-from automation.events.callbacks import on_event, callback_registry
-from automation.events.services import event_processor
-from automation.workflows.core import (
+from django_ai.automation.events.models import Event, EventStatus
+from django_ai.automation.events.callbacks import on_event, callback_registry
+from django_ai.automation.events.services import event_processor
+from django_ai.automation.workflows.core import (
     workflow,
     event_workflow,
     step,
@@ -26,8 +26,8 @@ from automation.workflows.core import (
     Retry,
     engine,
 )
-from automation.workflows.models import WorkflowRun, WorkflowStatus
-from automation.queues.sync_executor import SynchronousExecutor
+from django_ai.automation.workflows.models import WorkflowRun, WorkflowStatus
+from django_ai.automation.queues.sync_executor import SynchronousExecutor
 
 # Import test models
 from .models import Guest, Booking
@@ -39,7 +39,7 @@ class ProductionScenarioTests(TestCase):
     def setUp(self):
         """Set up test environment"""
         engine.set_executor(SynchronousExecutor())
-        from automation.workflows.core import _workflows, _event_workflows
+        from django_ai.automation.workflows.core import _workflows, _event_workflows
 
         _workflows.clear()
         _event_workflows.clear()
@@ -118,7 +118,7 @@ class ProductionScenarioTests(TestCase):
         self.assertGreater(total_events, len(bookings))
 
         # Process all due events using production task
-        from automation.queues import tasks as q2_tasks
+        from django_ai.automation.queues import tasks as q2_tasks
 
         result = q2_tasks.poll_due_events(hours=24)
         self.assertGreater(result["due_events_found"], 0)
@@ -299,7 +299,7 @@ class ProductionScenarioTests(TestCase):
         workflow_run.save()
 
         # Use the actual production task
-        from automation.queues import tasks as q2_tasks
+        from django_ai.automation.queues import tasks as q2_tasks
 
         q2_tasks.process_scheduled_workflows()
 
@@ -407,7 +407,7 @@ class ProductionScenarioTests(TestCase):
         )
 
         # Process events using production task - should handle missing entity gracefully
-        from automation.queues import tasks as q2_tasks
+        from django_ai.automation.queues import tasks as q2_tasks
 
         result = q2_tasks.poll_due_events(hours=48)
 
@@ -567,7 +567,7 @@ class StressTestWorkflows(TestCase):
 
     def setUp(self):
         engine.set_executor(SynchronousExecutor())
-        from automation.workflows.core import _workflows
+        from django_ai.automation.workflows.core import _workflows
 
         _workflows.clear()
 
@@ -644,15 +644,15 @@ class NamespaceIntegrationTests(TestCase):
 
     def setUp(self):
         engine.set_executor(SynchronousExecutor())
-        from automation.workflows.core import _workflows, _event_workflows
-        from automation.events.callbacks import callback_registry
+        from django_ai.automation.workflows.core import _workflows, _event_workflows
+        from django_ai.automation.events.callbacks import callback_registry
 
         _workflows.clear()
         _event_workflows.clear()
         callback_registry.clear()
 
         # Register the workflow integration handler
-        from automation.workflows.integration import handle_event_for_workflows
+        from django_ai.automation.workflows.integration import handle_event_for_workflows
 
         callback_registry.register(
             handle_event_for_workflows, event_name="*", namespace="*"
@@ -661,14 +661,14 @@ class NamespaceIntegrationTests(TestCase):
         self.guest = Guest.objects.create(email="test@example.com", name="Test User")
 
     def tearDown(self):
-        from automation.events.callbacks import callback_registry
+        from django_ai.automation.events.callbacks import callback_registry
 
         callback_registry.clear()
 
     def test_event_workflow_namespace_isolation(self):
         """Test that event workflows are isolated by namespace"""
         from pydantic import BaseModel
-        from automation.workflows.core import event_workflow, step, complete
+        from django_ai.automation.workflows.core import event_workflow, step, complete
         
         workflow_executions = []
 
@@ -729,7 +729,7 @@ class NamespaceIntegrationTests(TestCase):
 
     def test_callback_namespace_isolation(self):
         """Test that callbacks are properly isolated by namespace"""
-        from automation.events.callbacks import on_event
+        from django_ai.automation.events.callbacks import on_event
 
         callback_results = []
 
@@ -783,7 +783,7 @@ class NamespaceIntegrationTests(TestCase):
 
     def test_namespace_with_model_events(self):
         """Test namespace behavior with actual model-generated events"""
-        from automation.events.callbacks import on_event
+        from django_ai.automation.events.callbacks import on_event
 
         callback_results = []
 
@@ -825,7 +825,7 @@ class NamespaceIntegrationTests(TestCase):
 
     def test_multiple_namespace_callbacks_for_same_event(self):
         """Test multiple callbacks with different namespaces for the same event type"""
-        from automation.events.callbacks import on_event
+        from django_ai.automation.events.callbacks import on_event
 
         callback_results = []
 

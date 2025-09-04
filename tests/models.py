@@ -1,9 +1,9 @@
-from automation.events.models import EventDefinition, Event
+from django_ai.automation.events.models import EventDefinition, Event
 
 from django.db import models
 
 from django.db import models
-from automation.events.definitions import EventDefinition
+from django_ai.automation.events.definitions import EventDefinition
 
 class ITImmediate(models.Model):
     flag = models.BooleanField(default=False)

@@ -17,6 +17,8 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Framework :: Django",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
 dependencies = [
@@ -33,28 +35,41 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "pytest-django>=4.5.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0",
 ]
 
 [project.urls]
 "Homepage" = "https://github.com/state-zero/django-ai-first"
+"Documentation" = "https://django-ai-first.readthedocs.io/"
 "Bug Reports" = "https://github.com/state-zero/django-ai-first/issues"
 "Source" = "https://github.com/state-zero/django-ai-first"
 
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
-
+# Only include the main django_ai package (not test infrastructure)
 [tool.setuptools]
 packages = [
-    "saas_ai",
-    "automation",
-    "automation.events",
-    "automation.workflows", 
-    "automation.queues",
-    "automation.agents",
-    "conversations",
-    "tests",
+    "django_ai",
+    "django_ai.automation", 
+    "django_ai.automation.events",
+    "django_ai.automation.workflows",
+    "django_ai.automation.queues", 
+    "django_ai.automation.agents",
+    "django_ai.conversations",
 ]
+
+# Don't include example_project, tests, or saas_ai in the distributed package
+[tool.setuptools.package-data]
+"*" = ["*.html", "*.css", "*.js", "*.txt"]
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "saas_ai.settings"
 python_files = ["tests.py", "test_*.py", "*_tests.py"]
+
+[tool.black]
+line-length = 88
+target-version = ['py312']
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
