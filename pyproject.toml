@@ -53,6 +53,11 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
+"django_ai.automation.events" = ["migrations/*.py"]
+"django_ai.automation.workflows" = ["migrations/*.py"]
+"django_ai.automation.queues" = ["migrations/*.py"]
+"django_ai.automation.agents" = ["migrations/*.py"]
+"django_ai.conversations" = ["migrations/*.py"]
 "*" = ["*.html", "*.css", "*.js", "*.txt"]
 
 [tool.pytest.ini_options]
