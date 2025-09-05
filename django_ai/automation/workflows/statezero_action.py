@@ -1,4 +1,4 @@
-# django_ai/automation/workflows/as_action.py
+# django_ai/automation/workflows/statezero_action.py
 
 import inspect
 import logging
@@ -18,14 +18,14 @@ from .models import WorkflowRun
 logger = logging.getLogger(__name__)
 
 
-def as_action(name=None, serializer=None, response_serializer=None, permissions=None):
+def statezero_action(name=None, serializer=None, response_serializer=None, permissions=None):
     """
     Decorator that makes a workflow step callable as a StateZero action.
 
     Automatically handles workflow_run_id and calls the step with remaining arguments.
 
     Usage:
-    @as_action(name="expense_submit_review", serializer=ReviewInputSerializer)
+    @statezero_action(name="expense_submit_review", serializer=ReviewInputSerializer)
     @step()
     def await_review(self, reviewer_notes: str, priority: str):
         # workflow_run_id is handled automatically
@@ -167,7 +167,7 @@ def as_action(name=None, serializer=None, response_serializer=None, permissions=
             raise
 
         # Mark the original step function so we know it has an action
-        step_func._has_action = True
+        step_func._hstatezero_action = True
         step_func._action_function = decorated_action
 
         return step_func
