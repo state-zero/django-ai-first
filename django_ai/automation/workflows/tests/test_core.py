@@ -4,11 +4,11 @@ from django.test import TestCase
 from django.utils import timezone
 from pydantic import BaseModel
 
-from .core import (
+from ..core import (
     workflow, step, goto, sleep, wait, complete, fail, 
     engine, get_context, WorkflowEngine, Retry
 )
-from .models import WorkflowRun, WorkflowStatus
+from ..models import WorkflowRun, WorkflowStatus
 
 class MockExecutor:
     """Simple mock executor for testing"""
@@ -38,7 +38,7 @@ class WorkflowTestCase(TestCase):
 
     def tearDown(self):
         # Clean up any registered workflows
-        from .core import _workflows, _event_workflows
+        from ..core import _workflows, _event_workflows
         _workflows.clear()
         _event_workflows.clear()
 

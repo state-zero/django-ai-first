@@ -18,7 +18,6 @@ class WorkflowRun(models.Model):
         max_length=20, choices=WorkflowStatus.choices, default=WorkflowStatus.RUNNING
     )
 
-    # NEW: Link to triggering event
     triggered_by_event_id = models.IntegerField(null=True, blank=True)
 
     # Timing

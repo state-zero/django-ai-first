@@ -5,3 +5,5 @@ django-q2==1.8.0
 requests==2.31.0
 tika==2.6.0
 pusher==3.3.2
+statezero==0.1.0b9
+django-cors-headers==4.7.0
