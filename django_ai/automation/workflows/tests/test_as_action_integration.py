@@ -189,9 +189,10 @@ class AsActionStateZeroTest(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        # Should return 404 for nonexistent resource (proper HTTP semantics)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
         response_data = response.json()
-        self.assertEqual(response_data["status"], "error")
-        self.assertIn("not found", response_data["message"])
-        self.assertEqual(response_data["workflow_status"], "not_found")
+        self.assertEqual(response_data["status"], 404)
+        self.assertEqual(response_data["type"], "NotFound")
+        self.assertIn("detail", response_data)
