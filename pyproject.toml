@@ -41,16 +41,9 @@ dev = [
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
 
-[tool.setuptools]
-packages = [
-    "django_ai",
-    "django_ai.automation", 
-    "django_ai.automation.events",
-    "django_ai.automation.workflows",
-    "django_ai.automation.queues", 
-    "django_ai.automation.agents",
-    "django_ai.conversations",
-]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["django_ai*"]
 
 [tool.setuptools.package-data]
 "django_ai.automation.events" = ["migrations/*.py"]
