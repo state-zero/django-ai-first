@@ -53,35 +53,25 @@ class ConversationContext:
             print(f"Pusher error: {e}")
 
 
-def setup_conversation_context(session, request=None):
-    """Set up context for conversation processing"""
-    from .registry import registry
-
-    # Set basic context
-    _current_session.set(session)
-    _current_request.set(request)
-
-    # Load agent context from session.context (not metadata)
-    agent_class = registry.get(session.agent_path)
-    agent_instance = agent_class()
-
-    # session.context contains the agent's context dict
-    agent_context = agent_instance.Context(**session.context)
-    _current_agent_context.set(agent_context)
-
-    return ConversationContext(str(session.id), request)
-
-
 def get_context():
-    """Get current agent context (the main context mechanism)"""
-    return _current_agent_context.get()
+    """Get current agent context - auto-setup if needed"""
+    context = _current_agent_context.get()
+    if context is None:
+        # Auto-setup from current session
+        session = _current_session.get()
+        if session:
+            from .registry import registry
+
+            agent_class = registry.get(session.agent_path)
+            context = agent_class.Context(**session.context)
+            _current_agent_context.set(context)
+    return context
 
 
-def save_context():
-    """Save current agent context back to session.context"""
+def _auto_save_context():
+    """Automatically save context changes"""
     context = _current_agent_context.get()
     session = _current_session.get()
-
     if context and session:
         session.context = context.dict()
         session.save()
@@ -163,5 +153,5 @@ def get_file_text(file_id):
 
         file = File.objects.get(id=file_id)
         return file.extract_text()
-    except File.DoesNotExist:
+    except:
         return ""

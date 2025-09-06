@@ -1,8 +1,7 @@
 """
 StateZero hooks with request passing.
 """
-from .models import ConversationMessage
-from django_ai.automation.workflows.core import engine
+
 
 def set_message_type(data, request=None):
     """Pre-hook to set message type"""
@@ -21,6 +20,9 @@ def process_user_message(data, request=None):
     """Post-hook to process user messages with request context"""
     if data.get("message_type") == "user":
         try:
+            from .models import ConversationMessage
+            from django_ai.automation.workflows.core import engine
+
             message = (
                 ConversationMessage.objects.filter(
                     session_id=data.get("session"),

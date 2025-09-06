@@ -73,11 +73,12 @@ class FullFeatureTestAgent(ConversationAgent):
         user_name: str = ""
         conversation_count: int = 0
 
-    def create_context(self, request=None, **kwargs):
+    @classmethod
+    def create_context(cls, request=None, **kwargs):
         """Create agent context from request and kwargs"""
         user = request.user if request and request.user.is_authenticated else None
 
-        return self.Context(
+        return cls.Context(
             user_id=user.id if user else 0,
             user_name=getattr(user, "username", "Anonymous") if user else "Anonymous",
             conversation_count=kwargs.get("conversation_count", 5),

@@ -7,6 +7,7 @@ from typing import Dict, Type
 from django.utils.module_loading import import_string
 from django.conf import settings
 
+
 class AgentRegistry:
     """Registry for conversation agent classes - only accepts ConversationAgent subclasses"""
 

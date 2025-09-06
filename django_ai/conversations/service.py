@@ -4,9 +4,6 @@ Conversation service with clean context separation.
 
 import inspect
 import asyncio
-from .models import ConversationSession, ConversationMessage
-from .registry import registry
-from .context import setup_conversation_context, save_context
 
 
 class ConversationService:
@@ -15,11 +12,15 @@ class ConversationService:
     @classmethod
     def resolve_agent(cls, agent_path: str):
         """Resolve agent path to agent class"""
+        from .registry import registry
+
         return registry.get(agent_path)
 
     @classmethod
     def create_session(cls, agent_path, user=None, anonymous_id=None, context=None):
         """Create a new conversation session"""
+        from .models import ConversationSession
+
         cls.resolve_agent(agent_path)  # Validate
 
         session = ConversationSession.objects.create(
@@ -33,10 +34,14 @@ class ConversationService:
     @classmethod
     def send_message(cls, session_id, message, user=None, request=None, files=None):
         """Process message with clean context separation"""
+        from .models import ConversationSession, ConversationMessage
+        from .context import _current_session, _current_request, _auto_save_context
+
         session = ConversationSession.objects.get(id=session_id)
 
-        # Set up conversation context
-        conv_context = setup_conversation_context(session, request)
+        # Set context variables so get_context() can auto-load from session
+        _current_session.set(session)
+        _current_request.set(request)
 
         try:
             # Create agent instance
@@ -60,7 +65,7 @@ class ConversationService:
                     response = agent_instance(message, request=request)
 
             # Save context changes
-            save_context()
+            _auto_save_context()
 
             # Store agent response
             if response:
@@ -76,7 +81,7 @@ class ConversationService:
             }
 
         except Exception as e:
-            save_context()  # Save context even on error
+            _auto_save_context()  # Save context even on error
             ConversationMessage.objects.create(
                 session=session, message_type="system", content=f"Error: {str(e)}"
             )

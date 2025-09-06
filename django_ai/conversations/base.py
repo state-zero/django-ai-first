@@ -2,7 +2,6 @@ from abc import ABC, abstractmethod
 from typing import Optional, Any
 from django.http import HttpRequest
 from pydantic import BaseModel
-from .context import get_context
 
 
 class ConversationAgent(ABC):
@@ -29,11 +28,14 @@ class ConversationAgent(ABC):
     @property
     def context(self):
         """Convenient access to current agent context"""
+        from .context import get_context
+
         return get_context()
 
+    @classmethod
     @abstractmethod
     def create_context(
-        self, request: Optional[HttpRequest] = None, **kwargs
+        cls, request: Optional[HttpRequest] = None, **kwargs
     ) -> BaseModel:
         """
         Create the agent's initial context.
