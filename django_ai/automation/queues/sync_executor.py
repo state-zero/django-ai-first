@@ -27,5 +27,9 @@ class SynchronousExecutor:
         elif task_name == "cleanup_old_events":
             days = args[0] if args else 30
             event_processor.cleanup_old_events(days_old=days)
+        elif task_name == "process_conversation_message":
+            message_id = args[0]
+            from django_ai.conversations.tasks import process_conversation_message
+            process_conversation_message(message_id)
         else:
             raise ValueError(f"Unsupported task {task_name} in SynchronousExecutor")

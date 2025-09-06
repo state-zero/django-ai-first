@@ -62,6 +62,14 @@ STATEZERO_PUSHER = {
     "CLUSTER": os.getenv("PUSHER_CLUSTER"),
 }
 
+# Django ai pusher
+DJANGO_AI_PUSHER = {
+    "APP_ID": os.getenv("PUSHER_APP_ID"),
+    "KEY": os.getenv("PUSHER_KEY"),
+    "SECRET": os.getenv("PUSHER_SECRET"),
+    "CLUSTER": os.getenv("PUSHER_CLUSTER"),
+}
+
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
