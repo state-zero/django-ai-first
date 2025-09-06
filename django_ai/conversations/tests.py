@@ -14,6 +14,7 @@ from django_ai.conversations.models import (
     ConversationMessage,
     File,
 )
+from django_ai.conversations.base import ConversationAgent
 from django_ai.conversations.registry import register_agent
 from django_ai.conversations.decorators import with_context
 from django_ai.conversations.context import (
@@ -64,7 +65,7 @@ class PusherEventCapture:
             self.events.clear()
 
 
-class FullFeatureTestAgent:
+class FullFeatureTestAgent(ConversationAgent):
     """Test agent using the clean context system"""
 
     class Context(BaseModel):
@@ -103,7 +104,7 @@ class FullFeatureTestAgent:
         print(f"🤖 Agent processing: {message}")
 
         # Get agent context
-        ctx = get_context()
+        ctx = self.context
 
         # Parse the message to determine response type
         message_lower = message.lower()
