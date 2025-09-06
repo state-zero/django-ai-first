@@ -1,21 +1,27 @@
+"""
+Clean context system for conversations.
+"""
+
 import pusher
 from django.conf import settings
 import uuid
 import time
 from contextlib import contextmanager
-from threading import local
+from contextvars import ContextVar
+from typing import Optional, Any
 
-# Thread-local storage for context
-_context_local = local()
+# Thread-safe context storage
+_current_session = ContextVar("current_session", default=None)
+_current_agent_context = ContextVar("current_agent_context", default=None)
+_current_request = ContextVar("current_request", default=None)
 
 
 class ConversationContext:
-    """Conversation context for utilities"""
+    """Conversation context for Pusher utilities"""
 
-    def __init__(self, session_id, user=None, agent_instance=None):
+    def __init__(self, session_id, request=None):
         self.session_id = session_id
-        self.user = user
-        self._agent_instance = agent_instance  # Store agent instance for create_context
+        self.request = request
         self.channel_name = f"conversation-session-{session_id}"
 
         # Initialize Pusher client
@@ -35,7 +41,7 @@ class ConversationContext:
     def _send_event(self, event, data):
         """Send event via Pusher"""
         if not self.pusher_client:
-            return  # Fail silently if Pusher not configured
+            return
 
         try:
             self.pusher_client.trigger(
@@ -44,43 +50,71 @@ class ConversationContext:
                 {**data, "timestamp": time.time(), "id": str(uuid.uuid4())},
             )
         except Exception as e:
-            print(f"Pusher error: {e}")  # Fail silently in development
+            print(f"Pusher error: {e}")
 
 
-@contextmanager
-def chat_context(session_id, user=None, agent_instance=None):
-    """Context manager for conversation operations"""
-    context = ConversationContext(session_id, user, agent_instance)
-    _context_local.context = context
-    try:
-        yield context
-    finally:
-        _context_local.context = None
+def setup_conversation_context(session, request=None):
+    """Set up context for conversation processing"""
+    from .registry import registry
+
+    # Set basic context
+    _current_session.set(session)
+    _current_request.set(request)
+
+    # Load agent context from session.context (not metadata)
+    agent_class = registry.get(session.agent_path)
+    agent_instance = agent_class()
+
+    # session.context contains the agent's context dict
+    agent_context = agent_instance.Context(**session.context)
+    _current_agent_context.set(agent_context)
+
+    return ConversationContext(str(session.id), request)
 
 
-def get_current_context():
-    """Get current conversation context"""
-    return getattr(_context_local, "context", None)
+def get_context():
+    """Get current agent context (the main context mechanism)"""
+    return _current_agent_context.get()
 
 
-# Utility functions that work within context
+def save_context():
+    """Save current agent context back to session.context"""
+    context = _current_agent_context.get()
+    session = _current_session.get()
+
+    if context and session:
+        session.context = context.dict()
+        session.save()
+
+
+# Utility functions
 def display_widget(widget_type, data):
     """Display a widget in the current conversation"""
-    context = get_current_context()
-    if not context:
-        raise RuntimeError("display_widget() must be called within chat_context")
+    session = _current_session.get()
+    request = _current_request.get()
 
-    context._send_event("widget", {"widget_type": widget_type, "data": data})
+    if not session:
+        raise RuntimeError(
+            "display_widget() must be called within conversation context"
+        )
+
+    conv_context = ConversationContext(str(session.id), request)
+    conv_context._send_event("widget", {"widget_type": widget_type, "data": data})
 
 
 class ResponseStream:
     """Stream responses to the frontend"""
 
     def __init__(self):
-        self.context = get_current_context()
-        if not self.context:
-            raise RuntimeError("ResponseStream must be created within chat_context")
+        self.session = _current_session.get()
+        self.request = _current_request.get()
 
+        if not self.session:
+            raise RuntimeError(
+                "ResponseStream must be created within conversation context"
+            )
+
+        self.conv_context = ConversationContext(str(self.session.id), self.request)
         self.content = ""
         self._started = False
         self._ended = False
@@ -89,49 +123,41 @@ class ResponseStream:
         """Start the stream"""
         if self._started:
             return
-
         self._started = True
-        self.context._send_event("stream_start", {"metadata": metadata or {}})
+        self.conv_context._send_event("stream_start", {"metadata": metadata or {}})
 
     def write(self, chunk):
         """Write a chunk to the stream"""
         if not self._started:
             self.start()
-
         if self._ended:
             raise RuntimeError("Cannot write to ended stream")
-
         if chunk:
             self.content += str(chunk)
-            self.context._send_event("text_chunk", {"chunk": str(chunk)})
+            self.conv_context._send_event("text_chunk", {"chunk": str(chunk)})
 
     def end(self):
         """End the stream"""
         if self._ended:
             return
-
         if not self._started:
             self.start()
-
         self._ended = True
-        self.context._send_event("stream_end", {})
+        self.conv_context._send_event("stream_end", {})
 
     def __enter__(self):
-        """Context manager entry"""
         self.start()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit"""
         self.end()
 
     def __str__(self):
-        """Return the accumulated content"""
         return self.content
 
 
 def get_file_text(file_id):
-    """Utility function to get text from a file within chat context"""
+    """Utility function to get text from a file"""
     try:
         from .models import File
 
