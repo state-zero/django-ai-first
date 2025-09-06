@@ -1,7 +1,3 @@
-"""
-Clean context system for conversations.
-"""
-
 import pusher
 from django.conf import settings
 import uuid
@@ -9,6 +5,7 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Optional, Any
+from ..utils.json import safe_model_dump
 
 # Thread-safe context storage
 _current_session = ContextVar("current_session", default=None)
@@ -69,11 +66,11 @@ def get_context():
 
 
 def _auto_save_context():
-    """Automatically save context changes"""
+    """Automatically save context changes using safe JSON serialization"""
     context = _current_agent_context.get()
     session = _current_session.get()
     if context and session:
-        session.context = context.dict()
+        session.context = safe_model_dump(context)  # FIX: Use safe serialization
         session.save()
 
 

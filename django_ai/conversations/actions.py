@@ -1,6 +1,7 @@
 from statezero.core.actions import action
 from rest_framework import serializers
 import uuid
+from ..utils.json import safe_model_dump
 
 
 class StartConversationSerializer(serializers.Serializer):
@@ -29,7 +30,7 @@ def start_conversation(agent_path: str, context_kwargs: dict = None, request=Non
         agent_path=agent_path,
         user=user,
         anonymous_id=anonymous_id,
-        context=agent_context.dict(),  # Agent context goes here
+        context=safe_model_dump(agent_context),  # FIX: Use safe serialization
         # metadata stays empty/unused
     )
 

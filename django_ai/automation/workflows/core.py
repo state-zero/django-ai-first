@@ -4,7 +4,6 @@ from datetime import timedelta
 from typing import Dict, Any, Optional, Callable, TypeVar, Generic
 from pydantic import BaseModel
 
-# Type variable for workflow context
 T = TypeVar("T", bound=BaseModel)
 from dataclasses import dataclass
 from pydantic import BaseModel
@@ -12,6 +11,7 @@ from contextvars import ContextVar
 from django.db import transaction
 from .models import WorkflowRun, WorkflowStatus
 from django.utils import timezone
+from ...utils.json import safe_model_dump
 
 logger = logging.getLogger(__name__)
 
@@ -137,9 +137,9 @@ class WorkflowContextManager:
         return self._context
 
     def commit_changes(self):
-        """Save changes back to database"""
+        """Save changes back to database using safe JSON serialization"""
         if self._context is not None and self._run:
-            self._run.data = self._context.model_dump()
+            self._run.data = safe_model_dump(self._context)
             self._run.save()
 
     def rollback_changes(self):
@@ -316,7 +316,7 @@ class WorkflowEngine:
 
         workflow_cls = _workflows[workflow_name]
         initial_context = workflow_cls.create_context(**kwargs)
-        data = initial_context.model_dump()
+        data = safe_model_dump(initial_context)  # FIX: Use safe serialization
 
         run = WorkflowRun.objects.create(
             name=workflow_name,
@@ -333,7 +333,7 @@ class WorkflowEngine:
         """Start an event-triggered workflow"""
         # Create context from event - now uses unified method name
         initial_context = workflow_cls.create_context(event=event)
-        data = initial_context.model_dump()
+        data = safe_model_dump(initial_context)  # FIX: Use safe serialization
 
         # Add event info to context
         data["_event_id"] = event.id
@@ -527,7 +527,7 @@ class WorkflowEngine:
                 for key, value in result.result.items():
                     if hasattr(context, key):
                         setattr(context, key, value)
-                run.data = context.model_dump()
+                run.data = safe_model_dump(context)  # FIX: Use safe serialization
             run.save()
 
         elif isinstance(result, Fail):
@@ -548,7 +548,7 @@ class WorkflowEngine:
                 for key, value in payload.items():
                     if hasattr(context, key):
                         setattr(context, key, value)
-                run.data = context.model_dump()
+                run.data = safe_model_dump(context)  # FIX: Use safe serialization
 
             run.status = WorkflowStatus.RUNNING
             run.waiting_signal = ""
