@@ -46,6 +46,7 @@ INSTALLED_APPS = [
     "django_ai.automation.queues",
     "django_ai.automation.workflows",
     "django_ai.automation.agents",
+    "django_ai.conversations",
     "tests",
 ]
 

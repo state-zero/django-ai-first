@@ -7,24 +7,21 @@ import tempfile
 import requests
 import base64
 from django.utils import timezone
-import mimetypes
-import os
-import tempfile
-import requests
-import base64
-from django.utils import timezone
 
 from .text_extractor import TikaTextExtractor
 
 User = get_user_model()
+
 
 class ConversationSession(models.Model):
     """A conversation session with an AI agent"""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     agent_path = models.CharField(
-        max_length=255, help_text="Agent route like 'support/' or 'sales/'"
+        max_length=255, 
+        help_text="Agent name from registry like 'support', 'sales', etc."
     )
+    help_text = "Agent name from registry like 'support', 'sales', etc."
 
     # Flexible user reference
     user = models.ForeignKey(User, null=True, blank=True, on_delete=models.CASCADE)
@@ -74,7 +71,21 @@ class ConversationMessage(models.Model):
     # For widgets
     component_type = models.CharField(max_length=100, blank=True)
     component_data = models.JSONField(default=dict)
-    files = models.ManyToManyField('File', blank=True, related_name="messages")
+    files = models.ManyToManyField("File", blank=True, related_name="messages")
+
+    # Processing state for optimistic updates
+    PROCESSING_STATUS = [
+        ("pending", "Pending"),  # Just created, waiting for agent
+        ("processing", "Processing"),  # Agent is working on it
+        ("completed", "Completed"),  # Agent response saved
+        ("failed", "Failed"),  # Agent processing failed
+    ]
+    processing_status = models.CharField(
+        max_length=20,
+        choices=PROCESSING_STATUS,
+        default="completed",
+        help_text="Processing status for user messages",
+    )
 
     # Metadata
     metadata = models.JSONField(default=dict)
@@ -181,9 +192,8 @@ class File(models.Model):
                     temp_file.flush()
 
                     # Extract text
-                    extracted_text = TikaTextExtractor.extract_text(
-                        temp_file.name, lang
-                    )
+                    extractor = TikaTextExtractor()
+                    extracted_text = extractor.extract_text(temp_file.name, lang)
 
                     # Cache the result
                     self.extracted_text = extracted_text

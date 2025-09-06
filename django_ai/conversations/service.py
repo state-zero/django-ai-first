@@ -1,34 +1,24 @@
 import inspect
-from django.urls import resolve
-from django.utils.module_loading import import_string
 from django.conf import settings
 from .context import chat_context
 from .models import ConversationSession, ConversationMessage
-
+from .registry import registry
 
 class ConversationService:
     """Main service for handling conversation operations"""
 
     @classmethod
-    def get_chat_resolver(cls):
-        """Get the URLconf for chat agents"""
-        chat_urls_path = getattr(settings, "DJANGO_AI_CHAT_URLS", None)
-        if not chat_urls_path:
-            raise ValueError("DJANGO_AI_CHAT_URLS setting is required")
+    def resolve_agent(cls, agent_path: str):
+        """
+        Resolve agent path to agent class.
 
-        chat_urls_module = import_string(chat_urls_path)
-        return getattr(chat_urls_module, "chat_urlpatterns", [])
+        Args:
+            agent_path: Short name like 'support' or full path like 'myapp.agents.SupportAgent'
 
-    @classmethod
-    def resolve_agent(cls, agent_path):
-        """Use Django's URL resolution for agents"""
-        from django.urls.resolvers import URLResolver
-
-        try:
-            resolver = URLResolver(r"^", cls.get_chat_resolver())
-            return resolver.resolve(agent_path)
-        except Exception as e:
-            raise ValueError(f"No agent found for path '{agent_path}': {e}")
+        Returns:
+            Agent class
+        """
+        return registry.get(agent_path)
 
     @classmethod
     def create_session(cls, agent_path, user=None, anonymous_id=None, context=None):
@@ -46,24 +36,26 @@ class ConversationService:
         return session
 
     @classmethod
-    def send_message(cls, session_id, message, user=None):
+    def send_message(cls, session_id, message, user=None, files=None):
         """Process message with agent"""
         # Get session
         session = ConversationSession.objects.get(id=session_id)
 
         # Store user message
-        ConversationMessage.objects.create(
+        user_message = ConversationMessage.objects.create(
             session=session, message_type="user", content=message
         )
 
-        # Resolve agent
-        resolved = cls.resolve_agent(session.agent_path)
-        agent_handler = resolved.func
+        # Attach files to the message
+        if files:
+            user_message.files.set(files)
 
-        # Create agent instance if class-based
-        agent_instance = None
-        if hasattr(agent_handler, "get_response"):
-            agent_instance = agent_handler()
+        # Resolve agent
+        agent_class = cls.resolve_agent(session.agent_path)
+        agent_instance = agent_class()
+
+        # Attach files to agent instance for access in get_response
+        agent_instance.files = files or []
 
         # Run with chat context
         with chat_context(session_id, user, agent_instance) as ctx:
@@ -76,32 +68,24 @@ class ConversationService:
             }
 
             try:
-                if agent_instance:
-                    # Class-based agent
+                # Call agent
+                if hasattr(agent_instance, "get_response"):
                     if inspect.iscoroutinefunction(agent_instance.get_response):
                         import asyncio
 
                         response = asyncio.run(
-                            agent_instance.get_response(
-                                message, session_context, **resolved.kwargs
-                            )
+                            agent_instance.get_response(message, session_context)
                         )
                     else:
-                        response = agent_instance.get_response(
-                            message, session_context, **resolved.kwargs
-                        )
+                        response = agent_instance.get_response(message, session_context)
                 else:
                     # Function-based agent
-                    if inspect.iscoroutinefunction(agent_handler):
+                    if inspect.iscoroutinefunction(agent_instance):
                         import asyncio
 
-                        response = asyncio.run(
-                            agent_handler(message, session_context, **resolved.kwargs)
-                        )
+                        response = asyncio.run(agent_instance(message, session_context))
                     else:
-                        response = agent_handler(
-                            message, session_context, **resolved.kwargs
-                        )
+                        response = agent_instance(message, session_context)
 
                 # Store agent response
                 if response:
@@ -129,3 +113,43 @@ class ConversationService:
                     "error": str(e),
                     "session_id": str(session_id),
                 }
+
+
+# Example user code:
+
+"""
+# myapp/agents.py
+from pydantic import BaseModel
+
+class SupportAgent:
+    class Context(BaseModel):
+        user_id: int = 0
+        tier: str = "basic"
+    
+    def create_context(self):
+        return self.Context(
+            user_id=self.user.id if hasattr(self, 'user') and self.user else 0
+        )
+    
+    def get_response(self, message, session_context):
+        if "hello" in message.lower():
+            return "Hello! How can I help you today?"
+        return "I'm here to help!"
+
+class SalesAgent:
+    def get_response(self, message, session_context):
+        return "Thanks for your interest! Let me connect you with sales."
+
+
+# myapp/apps.py or myapp/__init__.py
+from django_ai.conversations.registry import register_agent
+from .agents import SupportAgent, SalesAgent
+
+register_agent('support', SupportAgent)
+register_agent('sales', SalesAgent)
+
+# Now users can create sessions with:
+# ConversationSession(agent_path="support", ...)
+# ConversationSession(agent_path="sales", ...)
+#
+"""

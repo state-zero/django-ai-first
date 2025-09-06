@@ -167,7 +167,7 @@ def statezero_action(name=None, serializer=None, response_serializer=None, permi
             raise
 
         # Mark the original step function so we know it has an action
-        step_func._hstatezero_action = True
+        step_func._has_statezero_action = True
         step_func._action_function = decorated_action
 
         return step_func
