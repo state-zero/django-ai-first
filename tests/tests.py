@@ -18,13 +18,9 @@ from django_ai.automation.workflows.core import (
     step,
     get_context,
     goto,
-    sleep,
-    wait,
-    wait_for_event,
     complete,
-    fail,
-    Retry,
     engine,
+    wait_for_event
 )
 from django_ai.automation.workflows.models import WorkflowRun, WorkflowStatus
 from django_ai.automation.queues.sync_executor import SynchronousExecutor
@@ -259,61 +255,57 @@ class ProductionScenarioTests(TestCase):
                 workflow_id: str
                 signals_received: list = []
                 timeouts_hit: int = 0
-                extra_data: str = ""  # Field for signal payload
+                extra_data: str = ""
 
             @classmethod
             def create_context(cls, workflow_id: str):
                 return cls.Context(workflow_id=workflow_id)
 
             @step(start=True)
-            def wait_for_signal_a(self):
-                return wait.for_signal(
-                    "test_signal_a",
-                    timeout=timedelta(seconds=1),
-                    on_timeout="timeout_step",
-                )
+            def start_waiting(self):
+                return goto(self.wait_for_signal_a)
 
+            @wait_for_event("test_signal_a", timeout=timedelta(seconds=1), on_timeout="timeout_step")
+            @step()
+            def wait_for_signal_a(self):
+                # This step runs if signal_a is received
+                ctx = get_context()
+                ctx.signals_received.append("signal_a")
+                return goto(self.wait_for_signal_b)
+            
             @step()
             def timeout_step(self):
                 ctx = get_context()
                 ctx.timeouts_hit += 1
                 return goto(self.wait_for_signal_b)
 
+            @wait_for_event("test_signal_b")
             @step()
             def wait_for_signal_b(self):
                 ctx = get_context()
-                # Check if signal payload was merged
-                if ctx.extra_data:  # Signal received
-                    ctx.signals_received.append("signal_b")
-                    return complete()
-                return wait.for_signal("test_signal_b")
+                ctx.signals_received.append("signal_b")
+                return complete()
 
-        # Start workflow - should be waiting for signal_a
         workflow_run = engine.start("signal_test_workflow", workflow_id="test_123")
         workflow_run.refresh_from_db()
-        self.assertEqual(workflow_run.status, WorkflowStatus.WAITING)
-        self.assertEqual(workflow_run.waiting_signal, "test_signal_a")
 
-        # Test timeout - set wake_at to past and process using production scheduler
+        self.assertEqual(workflow_run.status, WorkflowStatus.SUSPENDED)
+        self.assertEqual(workflow_run.waiting_signal, "event:test_signal_a")
+
         workflow_run.wake_at = timezone.now() - timedelta(seconds=1)
         workflow_run.save()
 
-        # Use the actual production task
         from django_ai.automation.queues import tasks as q2_tasks
-
         q2_tasks.process_scheduled_workflows()
 
-        # Should have timed out and moved to waiting for signal_b
         workflow_run.refresh_from_db()
-        self.assertEqual(workflow_run.status, WorkflowStatus.WAITING)
-        self.assertEqual(workflow_run.waiting_signal, "test_signal_b")
+        self.assertEqual(workflow_run.status, WorkflowStatus.SUSPENDED)
+        self.assertEqual(workflow_run.waiting_signal, "event:test_signal_b")
         self.assertEqual(workflow_run.data["timeouts_hit"], 1)
 
-        # Test signal mechanism - this should work like the debug test
-        engine.signal("test_signal_b", {"extra_data": "test"})
-
-        # Should complete like the debug test did
+        engine.signal("event:test_signal_b", {"extra_data": "test"})
         workflow_run.refresh_from_db()
+
         self.assertEqual(workflow_run.status, WorkflowStatus.COMPLETED)
         self.assertIn("signal_b", workflow_run.data["signals_received"])
         self.assertEqual(workflow_run.data["extra_data"], "test")
@@ -364,26 +356,28 @@ class ProductionScenarioTests(TestCase):
                 return cls.Context(workflow_id=workflow_id)
 
             @step(start=True)
-            def long_running_step(self):
-                return wait.for_signal("never_comes", timeout=timedelta(hours=1))
+            def start_waiting(self):
+                return goto(self.long_running_step)
 
+            @wait_for_event("never_comes", timeout=timedelta(hours=1))
+            @step()
+            def long_running_step(self):
+                # This step will never run because the signal is never sent
+                return complete()
+            
             @step()
             def cleanup_step(self):
                 ctx = get_context()
                 ctx.cleanup_performed = True
                 return complete()
-
-        # Start workflow
+            
         workflow_run = engine.start("cleanup_test_workflow", workflow_id="cleanup_test")
 
-        # Should be waiting
         workflow_run.refresh_from_db()
-        self.assertEqual(workflow_run.status, WorkflowStatus.WAITING)
+        self.assertEqual(workflow_run.status, WorkflowStatus.SUSPENDED)
 
-        # Cancel it
         engine.cancel(workflow_run.id)
 
-        # Should be cancelled
         workflow_run.refresh_from_db()
         self.assertEqual(workflow_run.status, WorkflowStatus.CANCELLED)
 

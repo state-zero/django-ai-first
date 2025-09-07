@@ -3,7 +3,8 @@ from django.db import models
 
 class WorkflowStatus(models.TextChoices):
     RUNNING = "running", "Running"
-    WAITING = "waiting", "Waiting"
+    WAITING = "waiting", "Waiting"  # For time-based sleep
+    SUSPENDED = "suspended", "Suspended"  # For external triggers (actions, events)
     COMPLETED = "completed", "Completed"
     FAILED = "failed", "Failed"
     CANCELLED = "cancelled", "Cancelled"

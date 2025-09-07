@@ -3,6 +3,7 @@
 import inspect
 import logging
 from rest_framework import serializers
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from statezero.core.actions import action
 from django.shortcuts import get_object_or_404
 from django.core.exceptions import ValidationError
@@ -13,26 +14,31 @@ from .core import (
     WorkflowContextManager,
     _current_context,
 )
-from .models import WorkflowRun
+from .models import WorkflowRun, WorkflowStatus
 
 logger = logging.getLogger(__name__)
 
 
-def statezero_action(name=None, serializer=None, response_serializer=None, permissions=None):
+def statezero_action(
+    name=None, serializer=None, response_serializer=None, permissions=None
+):
     """
     Decorator that makes a workflow step callable as a StateZero action.
 
     Automatically handles workflow_run_id and calls the step with remaining arguments.
+    The workflow is expected to be in a SUSPENDED state before this action can be called.
 
     Usage:
     @statezero_action(name="expense_submit_review", serializer=ReviewInputSerializer)
     @step()
     def await_review(self, reviewer_notes: str, priority: str):
-        # workflow_run_id is handled automatically
-        # step just gets the business logic arguments
+        # ... step logic ...
     """
 
     def decorator(step_func):
+        # Mark the function so the engine knows to suspend when transitioning to it
+        step_func._has_statezero_action = True
+
         # Get the step function signature to build the action signature
         step_sig = inspect.signature(step_func)
         step_params = list(step_sig.parameters.values())
@@ -84,6 +90,12 @@ def statezero_action(name=None, serializer=None, response_serializer=None, permi
 
             # Get workflow run - will raise Http404 if not found
             workflow_run = get_object_or_404(WorkflowRun, id=workflow_run_id)
+
+            # --- Validate that the workflow is suspended and waiting for this action ---
+            if workflow_run.status != WorkflowStatus.SUSPENDED:
+                raise DRFValidationError(
+                    f"Workflow is not in a state to receive this action. Current status: {workflow_run.status}"
+                )
 
             # Validate workflow exists in registry
             if workflow_run.name not in _workflows:
@@ -166,8 +178,6 @@ def statezero_action(name=None, serializer=None, response_serializer=None, permi
             logger.exception(f"Error decorating action {step_func.__name__}: {str(e)}")
             raise
 
-        # Mark the original step function so we know it has an action
-        step_func._has_statezero_action = True
         step_func._action_function = decorated_action
 
         return step_func

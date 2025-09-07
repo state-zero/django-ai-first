@@ -34,9 +34,12 @@ class TestEndToEndIntegration(TransactionTestCase):
         _workflows.clear()
         _event_workflows.clear()
         callback_registry.clear()
-        
+
         from ..workflows.integration import handle_event_for_workflows
-        callback_registry.register(handle_event_for_workflows, event_name="*", namespace="*")
+
+        callback_registry.register(
+            handle_event_for_workflows, event_name="*", namespace="*"
+        )
 
         from pydantic import BaseModel
 
@@ -81,10 +84,13 @@ class TestEndToEndIntegration(TransactionTestCase):
 
             @step(start=True)
             def start(self):
-                ctx = get_context()
-                # First entry -> park. Re-entry after signal (event_id present) -> advance.
-                if ctx.event_id is None:
-                    return wait_for_event("immediate_evt")
+                # Transition to the dedicated waiting step
+                return goto(self.wait_for_the_event)
+
+            @wait_for_event("immediate_evt")
+            @step()
+            def wait_for_the_event(self):
+                # This step only executes after the event is received.
                 return goto(self.after)
 
             @step()
@@ -178,7 +184,9 @@ class TestEndToEndIntegration(TransactionTestCase):
     def test_immediate_event_with_false_condition_does_not_fire(self):
         obj = ITImmediate.objects.create(flag=False)
         ct = ContentType.objects.get_for_model(ITImmediate)
-        ev = Event.objects.get(model_type=ct, entity_id=str(obj.pk), event_name="immediate_evt")
+        ev = Event.objects.get(
+            model_type=ct, entity_id=str(obj.pk), event_name="immediate_evt"
+        )
 
         # Event row exists but should not be processed
         self.assertEqual(ev.status, EventStatus.PENDING)
@@ -215,8 +223,8 @@ class TestEndToEndIntegration(TransactionTestCase):
     def test_waiter_does_not_advance_without_signal(self):
         run = engine.start("waiter")
         run.refresh_from_db()
-        # Should be stuck in WAITING until a signal arrives
-        self.assertEqual(run.status, WorkflowStatus.WAITING)
+        # Should be stuck in SUSPENDED until a signal arrives
+        self.assertEqual(run.status, WorkflowStatus.SUSPENDED)
         self.assertFalse(run.data.get("got_event"))
 
     def test_sleep_workflow_not_prematurely_completed(self):
@@ -225,7 +233,9 @@ class TestEndToEndIntegration(TransactionTestCase):
         run.refresh_from_db()
         self.assertEqual(run.status, WorkflowStatus.WAITING)
         # run the scheduler *before* wake_at is due
-        WorkflowRun.objects.filter(id=run.id).update(wake_at=timezone.now() + timedelta(hours=1))
+        WorkflowRun.objects.filter(id=run.id).update(
+            wake_at=timezone.now() + timedelta(hours=1)
+        )
         q2_tasks.process_scheduled_workflows()
         run.refresh_from_db()
         # Should still be WAITING
@@ -246,8 +256,11 @@ class TestEndToEndIntegration(TransactionTestCase):
 
         from django.contrib.contenttypes.models import ContentType
         from ..events.models import Event, EventStatus
+
         ct = ContentType.objects.get_for_model(ITImmediate)
-        ev = Event.objects.get(model_type=ct, entity_id=str(obj.pk), event_name="immediate_evt")
+        ev = Event.objects.get(
+            model_type=ct, entity_id=str(obj.pk), event_name="immediate_evt"
+        )
 
         # Sanity: it's pending and invalid
         self.assertEqual(ev.status, EventStatus.PENDING)

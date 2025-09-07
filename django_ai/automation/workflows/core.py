@@ -2,6 +2,7 @@ import logging
 import traceback
 from datetime import timedelta
 from typing import Dict, Any, Optional, Callable, TypeVar, Generic
+
 from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 from contextvars import ContextVar
 from django.db import transaction
+from django.db.models import Q
 from .models import WorkflowRun, WorkflowStatus
 from django.utils import timezone
 from ...utils.json import safe_model_dump
@@ -33,13 +35,6 @@ class Sleep(StepResult):
 
 
 @dataclass
-class Wait(StepResult):
-    signal: str
-    timeout: Optional[timedelta] = None
-    on_timeout: Optional[str] = None
-
-
-@dataclass
 class Complete(StepResult):
     result: Optional[Dict[str, Any]] = None
 
@@ -58,47 +53,25 @@ def sleep(duration: timedelta) -> Sleep:
     return Sleep(duration)
 
 
-def wait(
-    signal: str, timeout: Optional[timedelta] = None, on_timeout: Optional[str] = None
-) -> Wait:
-    """Wait for a specific signal"""
-    return Wait(signal, timeout, on_timeout)
-
-
 def wait_for_event(
     event_name: str,
     timeout: Optional[timedelta] = None,
     on_timeout: Optional[str] = None,
-) -> Wait:
-    """Wait for a specific event to occur"""
-    signal_name = f"event:{event_name}"
-    return Wait(signal_name, timeout, on_timeout)
+):
+    """Decorator to make a step wait for an event before executing."""
 
+    def decorator(func):
+        func._is_event_wait_step = True
+        func._wait_signal = f"event:{event_name}"
+        func._wait_timeout = timeout
+        # Convert method reference to name
+        if on_timeout and callable(on_timeout):
+            func._wait_on_timeout_step = on_timeout.__name__
+        else:
+            func._wait_on_timeout_step = on_timeout
+        return func
 
-# More intuitive wait with dot notation
-class WaitBuilder:
-    @staticmethod
-    def for_signal(
-        signal: str,
-        timeout: Optional[timedelta] = None,
-        on_timeout: Optional[str] = None,
-    ) -> Wait:
-        """Wait for a specific signal"""
-        return Wait(signal, timeout, on_timeout)
-
-    @staticmethod
-    def for_event(
-        event_name: str,
-        timeout: Optional[timedelta] = None,
-        on_timeout: Optional[str] = None,
-    ) -> Wait:
-        """Wait for a specific event to occur"""
-        signal_name = f"event:{event_name}"
-        return Wait(signal_name, timeout, on_timeout)
-
-
-# Create instance for dot notation
-wait = WaitBuilder()
+    return decorator
 
 
 def complete(**result) -> Complete:
@@ -316,24 +289,49 @@ class WorkflowEngine:
 
         workflow_cls = _workflows[workflow_name]
         initial_context = workflow_cls.create_context(**kwargs)
-        data = safe_model_dump(initial_context)  # FIX: Use safe serialization
+        data = safe_model_dump(initial_context)
+
+        start_step_name = workflow_cls._start_step
+        start_step_method = getattr(workflow_cls, start_step_name)
+
+        # Determine initial status based on the start step's decorators
+        initial_status = WorkflowStatus.RUNNING
+        is_suspending_step = False
+        if getattr(start_step_method, "_has_statezero_action", False):
+            initial_status = WorkflowStatus.SUSPENDED
+            is_suspending_step = True
+        elif getattr(start_step_method, "_is_event_wait_step", False):
+            initial_status = WorkflowStatus.SUSPENDED
+            is_suspending_step = True
 
         run = WorkflowRun.objects.create(
             name=workflow_name,
             version=workflow_cls._workflow_version,
-            current_step=workflow_cls._start_step,
+            current_step=start_step_name,
             data=data,
-            status=WorkflowStatus.RUNNING,
+            status=initial_status,
         )
 
-        self._queue_step(run.id, run.current_step)
+        # Only queue the step if the workflow is meant to be running
+        if not is_suspending_step:
+            self._queue_step(run.id, run.current_step)
+        elif getattr(start_step_method, "_is_event_wait_step", False):
+            # If it's a waiting step, we also need to set the signal info
+            run.waiting_signal = getattr(start_step_method, "_wait_signal", "")
+            run.on_timeout_step = (
+                getattr(start_step_method, "_wait_on_timeout_step", "") or ""
+            )
+            timeout = getattr(start_step_method, "_wait_timeout", None)
+            run.wake_at = timezone.now() + timeout if timeout else None
+            run.save()
+
         return run
 
     def start_for_event(self, event, workflow_cls) -> WorkflowRun:
         """Start an event-triggered workflow"""
         # Create context from event - now uses unified method name
         initial_context = workflow_cls.create_context(event=event)
-        data = safe_model_dump(initial_context)  # FIX: Use safe serialization
+        data = safe_model_dump(initial_context)
 
         # Add event info to context
         data["_event_id"] = event.id
@@ -399,7 +397,11 @@ class WorkflowEngine:
         """Cancel a running workflow"""
         try:
             run = WorkflowRun.objects.get(id=run_id)
-            if run.status in [WorkflowStatus.RUNNING, WorkflowStatus.WAITING]:
+            if run.status in [
+                WorkflowStatus.RUNNING,
+                WorkflowStatus.WAITING,
+                WorkflowStatus.SUSPENDED,
+            ]:
                 run.status = WorkflowStatus.CANCELLED
                 run.save()
         except WorkflowRun.DoesNotExist:
@@ -481,15 +483,13 @@ class WorkflowEngine:
     def _handle_result(self, run: WorkflowRun, result: StepResult):
         """Handle step execution results"""
         run.refresh_from_db()
+        workflow_cls = _workflows.get(run.name)
 
         if isinstance(result, Goto):
-            workflow_cls = _workflows[run.name]
-
             # Convert method reference to method name
             if callable(result.step):
                 step_name = result.step.__name__
             else:
-                # Fallback for backward compatibility
                 step_name = str(result.step)
 
             target = getattr(workflow_cls, step_name, None)
@@ -497,37 +497,37 @@ class WorkflowEngine:
                 raise ValueError(f"Target step {step_name} is not a @step")
 
             run.current_step = step_name
-            run.save()
-            self._queue_step(run.id, step_name)
+
+            # --- KEY CHANGE: Check if the target step requires suspension ---
+            if getattr(target, "_has_statezero_action", False):
+                run.status = WorkflowStatus.SUSPENDED
+                run.save()
+            elif getattr(target, "_is_event_wait_step", False):
+                run.status = WorkflowStatus.SUSPENDED
+                run.waiting_signal = getattr(target, "_wait_signal", "")
+                run.on_timeout_step = getattr(target, "_wait_on_timeout_step", "") or ""
+                timeout = getattr(target, "_wait_timeout", None)
+                run.wake_at = timezone.now() + timeout if timeout else None
+                run.save()
+            else:
+                # It's a normal step, queue for immediate execution
+                run.status = WorkflowStatus.RUNNING
+                run.save()
+                self._queue_step(run.id, step_name)
 
         elif isinstance(result, Sleep):
             run.status = WorkflowStatus.WAITING
             run.wake_at = timezone.now() + result.duration
             run.save()
 
-        elif isinstance(result, Wait):
-            run.status = WorkflowStatus.WAITING
-            run.waiting_signal = result.signal
-
-            # Convert method reference to method name for timeout
-            if result.on_timeout and callable(result.on_timeout):
-                timeout_step_name = result.on_timeout.__name__
-            else:
-                timeout_step_name = str(result.on_timeout) if result.on_timeout else ""
-
-            run.on_timeout_step = timeout_step_name
-            run.wake_at = timezone.now() + result.timeout if result.timeout else None
-            run.save()
-
         elif isinstance(result, Complete):
             run.status = WorkflowStatus.COMPLETED
             if result.result:
-                workflow_cls = _workflows[run.name]
                 context = workflow_cls.Context.model_validate(run.data)
                 for key, value in result.result.items():
                     if hasattr(context, key):
                         setattr(context, key, value)
-                run.data = safe_model_dump(context)  # FIX: Use safe serialization
+                run.data = safe_model_dump(context)
             run.save()
 
         elif isinstance(result, Fail):
@@ -538,7 +538,7 @@ class WorkflowEngine:
     def signal(self, signal_name: str, payload: Optional[Dict[str, Any]] = None):
         """Send signal to waiting workflows"""
         waiting_runs = WorkflowRun.objects.filter(
-            status=WorkflowStatus.WAITING, waiting_signal=signal_name
+            status=WorkflowStatus.SUSPENDED, waiting_signal=signal_name
         )
 
         for run in waiting_runs:
@@ -548,7 +548,7 @@ class WorkflowEngine:
                 for key, value in payload.items():
                     if hasattr(context, key):
                         setattr(context, key, value)
-                run.data = safe_model_dump(context)  # FIX: Use safe serialization
+                run.data = safe_model_dump(context)
 
             run.status = WorkflowStatus.RUNNING
             run.waiting_signal = ""
@@ -601,12 +601,21 @@ class WorkflowEngine:
     def process_scheduled(self):
         """Process workflows ready to wake up"""
         with transaction.atomic():
+            now = timezone.now()
+            # Find workflows that are either sleeping (WAITING) or have a signal timeout (SUSPENDED)
             ready_runs = WorkflowRun.objects.select_for_update(skip_locked=True).filter(
-                status=WorkflowStatus.WAITING, wake_at__lte=timezone.now()
+                Q(status=WorkflowStatus.WAITING, wake_at__lte=now)
+                | Q(
+                    status=WorkflowStatus.SUSPENDED,
+                    wake_at__lte=now,
+                    on_timeout_step__isnull=False,
+                )
+                & ~Q(on_timeout_step="")
             )
 
             for run in ready_runs:
-                if run.waiting_signal and run.on_timeout_step:
+                # If it's a timeout (must have an on_timeout_step)
+                if run.on_timeout_step:
                     run.status = WorkflowStatus.RUNNING
                     run.current_step = run.on_timeout_step
                     run.waiting_signal = ""
@@ -614,7 +623,8 @@ class WorkflowEngine:
                     run.wake_at = None
                     run.save()
                     self._queue_step(run.id, run.current_step)
-                else:
+                # If it's a simple sleep (was in WAITING status)
+                elif run.status == WorkflowStatus.WAITING:
                     run.status = WorkflowStatus.RUNNING
                     run.wake_at = None
                     run.save()
