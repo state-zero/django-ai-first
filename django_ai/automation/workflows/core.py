@@ -2,6 +2,7 @@ import logging
 import traceback
 from datetime import timedelta
 from typing import Dict, Any, Optional, Callable, TypeVar, Generic
+from django.conf import settings
 
 from pydantic import BaseModel
 
@@ -559,6 +560,11 @@ class WorkflowEngine:
 
     def _handle_error(self, run_id: int, step_name: str, error: Exception):
         """Handle step execution errors with retry"""
+        
+        # If WORKFLOW_TESTING_MODE is True, re-raise the original exception immediately
+        if getattr(settings, 'WORKFLOW_TESTING_MODE', False):
+            raise error
+        
         try:
             run = WorkflowRun.objects.get(id=run_id)
         except WorkflowRun.DoesNotExist:
