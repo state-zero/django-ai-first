@@ -1,4 +1,3 @@
-from statezero.core.actions import action
 from rest_framework import serializers
 import uuid
 from ..utils.json import safe_model_dump
@@ -9,7 +8,6 @@ class StartConversationSerializer(serializers.Serializer):
     context = serializers.JSONField(required=False, default=dict)
 
 
-@action(name="start_conversation", serializer=StartConversationSerializer)
 def start_conversation(agent_path: str, context_kwargs: dict = None, request=None):
     """Create conversation session with agent context in context field"""
     from .models import ConversationSession
@@ -30,7 +28,7 @@ def start_conversation(agent_path: str, context_kwargs: dict = None, request=Non
         agent_path=agent_path,
         user=user,
         anonymous_id=anonymous_id,
-        context=safe_model_dump(agent_context),  # FIX: Use safe serialization
+        context=safe_model_dump(agent_context),
         # metadata stays empty/unused
     )
 
@@ -39,3 +37,12 @@ def start_conversation(agent_path: str, context_kwargs: dict = None, request=Non
         "status": "created",
         "agent_path": agent_path,
     }
+
+"""
+Use it in your project code like this -
+
+from statezero.core.actions import action
+
+action(start_conversation, name="start_conversation", serializer=StartConversationSerializer)
+
+"""
