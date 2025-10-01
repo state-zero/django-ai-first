@@ -1,8 +1,16 @@
-# Chat Agents Developer Guide
+# Django AI Conversations
 
-> Build conversational AI interfaces with real-time streaming, file processing, and rich UI widgets.
+**Build conversational AI interfaces with real-time streaming, context management, and rich UI widgets**
 
-Chat agents are **request/response handlers** that power interactive conversations with users. Unlike automation agents (which handle background events), these respond to chat messages.
+Django AI Conversations provides the infrastructure for building chat agents in Django applications. Handle user messages, stream responses in real-time, process files, and display interactive widgets - all with a clean, Django-native API.
+
+---
+
+## Why Django AI Conversations?
+
+**The Challenge:** Building conversational interfaces means managing WebSocket connections, streaming responses, maintaining conversation state, handling file uploads, and coordinating with your backend logic.
+
+**The Solution:** Django AI Conversations provides the framework - you just implement the conversation logic in your agent classes.
 
 ---
 
@@ -12,336 +20,453 @@ Chat agents are **request/response handlers** that power interactive conversatio
 
 ```python
 # your_app/chat_agents.py
+from django_ai.conversations import ConversationAgent
+from django_ai.conversations.context import ResponseStream
 from pydantic import BaseModel
-from conversations.context import ResponseStream, display_widget, get_file_text
 
-class SupportAgent:
+class SupportAgent(ConversationAgent):
+    """Customer support agent"""
+    
     class Context(BaseModel):
         user_id: int = 0
-        user_email: str = ""
-        conversation_stage: str = "greeting"
+        support_tier: str = "basic"
     
-    def create_context(self):
-        """Called when session starts - build your context"""
-        return self.Context(
-            user_id=self.user.id if self.user else 0,
-            user_email=self.user.email if self.user else ""
+    @classmethod
+    def create_context(cls, request=None, **kwargs):
+        """Build context when session starts"""
+        user = request.user if request and request.user.is_authenticated else None
+        return cls.Context(
+            user_id=user.id if user else 0,
+            support_tier=kwargs.get('tier', 'basic')
         )
     
-    async def get_response(self, message: str, session_context: dict, **kwargs):
-        """Main handler - process user message and return response"""
+    async def get_response(self, message, request=None, **kwargs):
+        """Process user message and return response"""
         
-        # Simple response
+        # Simple response (no streaming)
         if "hello" in message.lower():
             return "Hello! How can I help you today?"
         
-        return "I'm here to help with your support needs."
+        # Streaming response (real-time chunks via WebSocket)
+        with ResponseStream() as stream:
+            stream.write("Let me check that for you")
+            # ... process request ...
+            stream.write("Here's what I found...")
+        
+        return stream.content
 ```
 
 ### 2. Register Your Agent
 
 ```python
-# your_app/chat_urls.py
-from django.urls import path
+# your_app/agents.py
+from django_ai.conversations.registry import register_agent
 from .chat_agents import SupportAgent
 
-chat_urlpatterns = [
-    path('support/', SupportAgent.as_view()),
-    path('sales/', SalesAgent.as_view()),
-]
+register_agent("support", SupportAgent)
+register_agent("sales", SalesAgent)
 ```
 
 ### 3. Configure Settings
 
 ```python
 # settings.py
-DJANGO_AI_CHAT_URLS = "your_app.chat_urls"
+INSTALLED_APPS = [
+    # ... other apps
+    'django_ai.conversations',
+]
 
-# Optional: Real-time features
+# Optional: Enable real-time streaming
 DJANGO_AI_PUSHER = {
+    'APP_ID': 'your_pusher_app_id',
     'KEY': 'your_pusher_key',
     'SECRET': 'your_pusher_secret',
-    'APP_ID': 'your_app_id',
     'CLUSTER': 'us2'
 }
 ```
 
-### 4. Use the API
+### 4. Use from Your Application
 
 ```python
-from conversations.service import ConversationService
+from django_ai.conversations.actions import start_conversation
+from django_ai.conversations.service import ConversationService
 
-# Create session
-session = ConversationService.create_session(
-    agent_path="support/",
-    user=request.user
+# Create conversation session
+session = start_conversation(
+    agent_path="support",
+    context_kwargs={"tier": "premium"},
+    request=request
 )
 
 # Send message
 result = ConversationService.send_message(
-    session_id=session.id,
-    message="I need help",
-    user=request.user
+    session_id=session['session_id'],
+    message="I need help with billing",
+    user=request.user,
+    request=request
 )
+
+# Returns: {"status": "success", "response": "...", "session_id": "..."}
 ```
 
 ---
 
 ## Core Features
 
-### Real-Time Streaming
+### 🌊 Real-Time Streaming
 
-Stream responses for better UX:
+Stream responses for better UX - chunks are automatically sent via WebSocket:
 
 ```python
-async def get_response(self, message, session_context, **kwargs):
+async def get_response(self, message, request=None, **kwargs):
     with ResponseStream() as stream:
-        stream.write("Let me think...")
+        stream.write("Processing your request")
         
-        # Your AI processing here
-        response = await call_your_ai(message)
+        # Call your AI/LLM here
+        result = await your_ai_function(message)
         
-        # Stream the response chunk by chunk
-        for chunk in response.split():
-            stream.write(chunk + " ")
+        # Stream response word by word
+        for word in result.split():
+            stream.write(word + " ")
     
-    return stream.content  # Full response
+    return stream.content  # Full accumulated response
 ```
 
-### Rich UI Widgets
+Frontend receives `text_chunk` events via Pusher WebSocket automatically.
 
-Display interactive components:
+### 🎯 Context Management
+
+Define strongly-typed context with Pydantic that flows through your agent:
 
 ```python
-async def get_response(self, message, session_context, **kwargs):
+class MyAgent(ConversationAgent):
+    class Context(BaseModel):
+        user_id: int
+        subscription_tier: str
+        conversation_count: int = 0
+    
+    @classmethod
+    def create_context(cls, request=None, **kwargs):
+        """Called once per session"""
+        return cls.Context(
+            user_id=request.user.id,
+            subscription_tier=kwargs.get('tier', 'free'),
+            conversation_count=0
+        )
+    
+    async def get_response(self, message, request=None, **kwargs):
+        # Access context
+        ctx = self.context
+        ctx.conversation_count += 1
+        
+        return f"Message #{ctx.conversation_count} for user {ctx.user_id}"
+```
+
+### 🔧 Context Injection
+
+Automatically inject context into tool functions (perfect for LLM function calling):
+
+```python
+from django_ai.conversations.decorators import with_context
+
+class SalesAgent(ConversationAgent):
+    class Context(BaseModel):
+        user_id: int
+        account_tier: str
+    
+    @with_context()
+    def check_eligibility(self, product_id: str, user_id: int, account_tier: str):
+        """Context parameters auto-injected - LLM only needs to provide product_id"""
+        if account_tier == "premium":
+            return f"User {user_id} can access {product_id}"
+        return "Upgrade required"
+    
+    async def get_response(self, message, request=None, **kwargs):
+        # Use with LiteLLM, OpenAI, etc. - they only see product_id parameter
+        result = self.check_eligibility(product_id="pro-features")
+        return result
+```
+
+The `@with_context()` decorator preserves function signatures for LLM introspection while injecting context at runtime.
+
+### 🎨 Rich UI Widgets
+
+Display interactive components in the chat:
+
+```python
+from django_ai.conversations.context import display_widget
+
+async def get_response(self, message, request=None, **kwargs):
     if "book appointment" in message.lower():
         display_widget("appointment_form", {
             "available_slots": ["2024-01-15 10:00", "2024-01-15 14:00"],
             "callback_url": "/api/book-appointment"
         })
         
-        return "Please select your preferred appointment time."
+        return "Please select your preferred time above."
 ```
 
-### File Processing
+### 📄 File Processing
 
-Handle file uploads with automatic text extraction:
+Handle file uploads with automatic text extraction (PDFs, images, documents):
 
 ```python
-async def get_response(self, message, session_context, **kwargs):
-    # Access uploaded files (if any)
+from django_ai.conversations.context import get_file_text
+
+async def get_response(self, message, request=None, **kwargs):
     if hasattr(self, 'files') and self.files:
-        file_responses = []
+        results = []
         
         for file in self.files:
-            # Extract text from PDFs, images, docs (uses Apache Tika + OCR)
+            # Automatic extraction using Apache Tika + OCR
             text = get_file_text(file.id)
             
             if text:
-                file_responses.append(f"From {file.filename}: {text[:200]}...")
+                results.append(f"From {file.filename}: {text[:200]}...")
         
-        return "I've analyzed your files:\n" + "\n".join(file_responses)
+        return "File analysis:\n" + "\n".join(results)
     
-    return "Upload a document and I'll analyze it for you."
-```
-
-### Context Injection
-
-Automatically inject agent context into functions:
-
-```python
-from conversations.decorators import with_context
-
-class SalesAgent:
-    class Context(BaseModel):
-        user_id: int
-        subscription_tier: str = "free"
-    
-    @with_context()
-    def check_user_eligibility(self, product_id: str, user_id: int, subscription_tier: str):
-        """Parameters automatically injected from agent context"""
-        if subscription_tier == "premium":
-            return f"User {user_id} can access {product_id}"
-        return "Upgrade required"
-    
-    async def get_response(self, message, session_context, **kwargs):
-        if "check eligibility" in message:
-            result = self.check_user_eligibility(product_id="pro-features")
-            return result
+    return "Upload a file and I'll analyze it."
 ```
 
 ---
 
-## Agent Types
+## Architecture
 
-### Class-Based (Recommended)
+### How It Works
 
-```python
-class MyAgent:
-    class Context(BaseModel):
-        # Define your context structure
-        field1: str = ""
-        field2: int = 0
-    
-    def create_context(self):
-        return self.Context(...)
-    
-    async def get_response(self, message, session_context, **kwargs):
-        return "Response"
-```
+1. **Agent Registration** - Agents are registered with paths like "support", "sales/premium"
+2. **Session Creation** - Each conversation gets a session with agent path and context
+3. **Message Flow** - User messages → `ConversationService.send_message()` → Agent's `get_response()`
+4. **Response Types**:
+   - **Non-streaming**: Return string directly (no WebSocket events)
+   - **Streaming**: Use `ResponseStream` (sends `text_chunk` events via Pusher)
+5. **Storage** - All messages stored in `ConversationMessage` model
 
-### Function-Based
+### Two Parallel Systems
 
-```python
-async def my_agent(message: str, session_context: dict, **kwargs):
-    return "Simple response"
+**Database (via StateZero or Django ORM)**
+- Stores conversation sessions and messages
+- Provides message history
+- Handles CRUD operations
 
-# In chat_urls.py
-path('simple/', my_agent),
-```
+**WebSocket (via Pusher)**
+- Streams response chunks in real-time
+- Sends widget display events
+- Provides live updates during agent processing
+
+They work together but serve different purposes.
 
 ---
 
-## Sessions & Messages
+## API Reference
 
-### Session Management
+### ConversationAgent Base Class
 
 ```python
-# Sessions store conversation state
-session = ConversationSession.objects.create(
-    agent_path="support/",
-    user=user,  # or None for anonymous
-    anonymous_id="guest_123",  # for anonymous users
-    context={"custom": "data"},  # Initial context
-    status="active"  # active/completed/archived
+class YourAgent(ConversationAgent):
+    class Context(BaseModel):
+        """Define your context structure"""
+        pass
+    
+    @classmethod
+    def create_context(cls, request=None, **kwargs):
+        """Create context when session starts"""
+        return cls.Context(...)
+    
+    async def get_response(self, message, request=None, **kwargs):
+        """Main handler - return string response"""
+        return "response"
+```
+
+### ConversationService
+
+```python
+from django_ai.conversations.service import ConversationService
+
+# Create session
+session = ConversationService.create_session(
+    agent_path="support",
+    user=request.user,
+    anonymous_id="guest_123",  # For anonymous users
+    context={"custom": "data"}
+)
+
+# Send message
+result = ConversationService.send_message(
+    session_id=session.id,
+    message="user message",
+    user=request.user,
+    request=request
 )
 ```
 
-### Message Types
+### Actions (Recommended)
 
 ```python
-# Messages are automatically stored
-ConversationMessage.objects.create(
-    session=session,
-    message_type="user",     # user/agent/system/widget
-    content="Hello",
-    component_type="",       # For widgets
-    component_data={},       # Widget data
-    files=file_objects       # Attached files
+from django_ai.conversations.actions import start_conversation
+
+# Higher-level API
+session = start_conversation(
+    agent_path="support",
+    context_kwargs={"tier": "premium"},
+    request=request
 )
+```
+
+### Context Utilities
+
+```python
+from django_ai.conversations.context import (
+    ResponseStream,  # Stream response chunks
+    display_widget,  # Show UI component
+    get_file_text    # Extract text from files
+)
+
+# Streaming
+with ResponseStream() as stream:
+    stream.write("chunk")
+    stream.write("another chunk")
+# stream.content has full text
+
+# Widgets
+display_widget("widget_type", {"data": "here"})
+
+# Files
+text = get_file_text(file_id)
 ```
 
 ---
 
 ## Configuration
 
-### Text Extraction
+### Required Settings
 
 ```python
-# settings.py - Configure text extraction strategy
-SAAS_AI = {
-    'TEXT_EXTRACTOR': 'your_app.extractors.CustomExtractor'
+INSTALLED_APPS = [
+    'django_ai.conversations',
+]
+```
+
+### Optional Settings
+
+```python
+# Enable real-time streaming (requires Pusher account)
+DJANGO_AI_PUSHER = {
+    'APP_ID': 'your_app_id',
+    'KEY': 'your_key',
+    'SECRET': 'your_secret',
+    'CLUSTER': 'us2'
 }
 
-# Custom extractor
-from conversations.text_extractor import TextExtractor
-
-class CustomExtractor(TextExtractor):
-    def extract_text(self, file_path: str, lang: str = "eng") -> str:
-        # Your implementation
-        return extracted_text
+# Custom text extraction
+DJANGO_AI = {
+    'TEXT_EXTRACTOR': 'your_app.extractors.CustomExtractor'
+}
 ```
-
-### Real-Time Events
-
-When Pusher is configured, these events are sent automatically:
-- `stream_start` - Response streaming begins
-- `text_chunk` - Each chunk of streamed text  
-- `stream_end` - Response streaming complete
-- `widget` - Widget display
 
 ---
 
-## Best Practices
-
-### Error Handling
+## Models
 
 ```python
-async def get_response(self, message, session_context, **kwargs):
-    try:
-        return await your_processing(message)
-    except Exception as e:
-        logger.exception(f"Agent error: {e}")
-        return "Sorry, I encountered an error. Please try again."
+from django_ai.conversations.models import (
+    ConversationSession,  # Conversation with an agent
+    ConversationMessage,  # Individual message
+    File                  # Uploaded file
+)
+
+# Sessions track conversations
+session = ConversationSession.objects.create(
+    agent_path="support",
+    user=user,  # or None
+    context={"initial": "data"},
+    status="active"  # active/completed/archived
+)
+
+# Messages are automatically created
+message = ConversationMessage.objects.filter(
+    session=session,
+    message_type="agent"  # user/agent/system/widget
+)
 ```
 
-### Context Updates
+---
+
+## Examples
+
+### Basic Echo Agent
 
 ```python
-def create_context(self):
-    # Context is created once per session
-    # Use session_context dict for per-message data
-    return self.Context(persistent_data="here")
-
-async def get_response(self, message, session_context, **kwargs):
-    # session_context contains:
-    # - user_id, session_id, anonymous_id
-    # - Any custom context from session creation
-    current_user = session_context.get('user_id')
+class EchoAgent(ConversationAgent):
+    async def get_response(self, message, request=None, **kwargs):
+        return f"You said: {message}"
 ```
 
-### Performance
+### LLM Integration (LiteLLM)
 
 ```python
-class OptimizedAgent:
-    def __init__(self):
-        # Cache expensive resources at class level
-        self.cached_data = load_expensive_data()
+import litellm
+
+class AIAgent(ConversationAgent):
+    async def get_response(self, message, request=None, **kwargs):
+        with ResponseStream() as stream:
+            response = litellm.completion(
+                model="gpt-4",
+                messages=[{"role": "user", "content": message}],
+                stream=True
+            )
+            
+            for chunk in response:
+                content = chunk.choices[0].delta.content or ""
+                stream.write(content)
+        
+        return stream.content
+```
+
+### Function Calling with Context
+
+```python
+class SmartAgent(ConversationAgent):
+    class Context(BaseModel):
+        user_id: int
+        org_id: int
     
-    async def get_response(self, message, session_context, **kwargs):
-        # Use cached resources
-        return self.process_with_cache(message)
+    @with_context()
+    def get_user_data(self, user_id: int, org_id: int):
+        """Context injected automatically"""
+        return fetch_user_data(user_id, org_id)
+    
+    async def get_response(self, message, request=None, **kwargs):
+        # Use with LLM function calling
+        tools = [self.get_user_data]
+        response = litellm.completion(
+            model="gpt-4",
+            messages=[{"role": "user", "content": message}],
+            tools=tools
+        )
+        # Context injected when LLM calls the function
+        return response.choices[0].message.content
 ```
 
 ---
 
-## API Reference
+## Requirements
 
-### ConversationService
+- Django 4.0+
+- Python 3.12+
+- Pusher account (optional, for real-time features)
 
-```python
-# Create session
-session = ConversationService.create_session(
-    agent_path: str,           # e.g. "support/"
-    user: User = None,         # Django user or None
-    anonymous_id: str = None,  # For anonymous users
-    context: dict = None       # Initial context data
-)
+## Installation
 
-# Send message
-result = ConversationService.send_message(
-    session_id: UUID,
-    message: str,
-    user: User = None
-)
-# Returns: {"status": "success", "response": "...", "session_id": "..."}
+```bash
+pip install django-ai-first
 ```
 
-### Context Utilities
+## License
 
-```python
-# In agent methods:
-display_widget(widget_type: str, data: dict)  # Show UI component
-get_file_text(file_id: UUID) -> str           # Extract file text
-
-# ResponseStream
-with ResponseStream() as stream:
-    stream.start(metadata=dict)    # Optional start metadata
-    stream.write(chunk: str)       # Write text chunk
-    stream.end()                   # Finish stream
-# stream.content contains full accumulated text
-```
+Free commercial license - use in personal and commercial projects at no cost.
 
 ---
 
-That's it! The conversations app provides the framework - you implement the actual conversational AI logic in your chat agent classes.
+**That's it!** Django AI Conversations provides the infrastructure - you implement the conversation logic.
