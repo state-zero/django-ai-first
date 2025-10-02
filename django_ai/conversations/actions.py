@@ -5,7 +5,7 @@ from ..utils.json import safe_model_dump
 
 class StartConversationSerializer(serializers.Serializer):
     agent_path = serializers.CharField(max_length=255)
-    context = serializers.JSONField(required=False, default=dict)
+    context_kwargs = serializers.JSONField(required=False, default=dict)
 
 
 def start_conversation(agent_path: str, context_kwargs: dict = None, request=None):
