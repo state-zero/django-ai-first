@@ -3,7 +3,6 @@ from typing import Optional, Any
 from django.http import HttpRequest
 from pydantic import BaseModel
 
-
 class ConversationAgent(ABC):
     """
     Abstract base class for conversation agents.
@@ -29,8 +28,13 @@ class ConversationAgent(ABC):
     def context(self):
         """Convenient access to current agent context"""
         from .context import get_context
-
         return get_context()
+    
+    @property
+    def session(self):
+        """Convenient access to current conversation session"""
+        from .context import _current_session
+        return _current_session.get()
 
     @classmethod
     @abstractmethod
