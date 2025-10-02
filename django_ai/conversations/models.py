@@ -53,7 +53,7 @@ class ConversationSession(models.Model):
 
 class ConversationMessage(models.Model):
     """Individual messages in a conversation"""
-
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session = models.ForeignKey(
         ConversationSession, on_delete=models.CASCADE, related_name="messages"
     )
