@@ -55,7 +55,7 @@ class ConversationAgent(ABC):
 
     @abstractmethod
     async def get_response(
-        self, message: str, request: Optional[HttpRequest] = None, **kwargs
+        self, message: str, request: Optional[HttpRequest] = None, files=None, **kwargs
     ) -> str:
         """
         Generate a response to the user's message.

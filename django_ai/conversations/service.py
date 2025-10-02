@@ -47,22 +47,21 @@ class ConversationService:
             # Create agent instance
             agent_class = cls.resolve_agent(session.agent_path)
             agent_instance = agent_class()
-            agent_instance.files = files or []
 
             # Call agent with clean signature
             if hasattr(agent_instance, "get_response"):
                 if inspect.iscoroutinefunction(agent_instance.get_response):
                     response = asyncio.run(
-                        agent_instance.get_response(message, request=request)
+                        agent_instance.get_response(message, request=request, files=files)
                     )
                 else:
-                    response = agent_instance.get_response(message, request=request)
+                    response = agent_instance.get_response(message, request=request, files=files)
             else:
                 # Function-based agent
                 if inspect.iscoroutinefunction(agent_instance):
-                    response = asyncio.run(agent_instance(message, request=request))
+                    response = asyncio.run(agent_instance(message, request=request, files=files))
                 else:
-                    response = agent_instance(message, request=request)
+                    response = agent_instance(message, request=request, files=files)
 
             # Save context changes
             _auto_save_context()

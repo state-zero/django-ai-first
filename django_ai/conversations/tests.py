@@ -100,7 +100,7 @@ class FullFeatureTestAgent(ConversationAgent):
         is_admin = user_name == "integrationtest"  # Our test user
         return f"User {user_name} ({'admin' if is_admin else 'regular'}) permissions verified"
 
-    async def get_response(self, message, request=None, **kwargs):
+    async def get_response(self, message, request=None, files=None, **kwargs):
         """Main response handler with clean signature"""
         print(f"🤖 Agent processing: {message}")
 
@@ -140,9 +140,9 @@ class FullFeatureTestAgent(ConversationAgent):
             )
             return "Interactive widget displayed above!"
 
-        elif "file" in message_lower and hasattr(self, "files") and self.files:
-            # File processing
-            return self._process_files()
+        elif "file" in message_lower and files:
+            # File processing - now uses explicit files parameter
+            return self._process_files(files)
 
         else:
             # Default echo response with context update
@@ -170,10 +170,10 @@ class FullFeatureTestAgent(ConversationAgent):
         print(f"✅ Streaming complete: {stream.content}")
         return stream.content
 
-    def _process_files(self):
-        """Process uploaded files"""
+    def _process_files(self, files):
+        """Process uploaded files - now receives files as parameter"""
         results = []
-        for file_obj in self.files:
+        for file_obj in files:
             text = get_file_text(file_obj.id)
             if text:
                 results.append(
@@ -232,7 +232,7 @@ class FullConversationFlowTest(APITestCase):
 
         print(f"🚀 Test Setup Complete - Session: {self.session.id}")
 
-    def _send_message(self, content):
+    def _send_message(self, content, files=None):
         """Send message via ConversationService with request context"""
         from django_ai.conversations.service import ConversationService
 
@@ -246,6 +246,7 @@ class FullConversationFlowTest(APITestCase):
             message=content,
             user=self.user,
             request=request,
+            files=files,
         )
 
     def _verify_messages(self, expected_count):
