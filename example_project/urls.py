@@ -22,4 +22,8 @@ urlpatterns = [
     path(
         "statezero/", include("statezero.adaptors.django.urls", namespace="statezero")
     ),
+    path(
+        "django-ai/conversations/", 
+        include("django_ai.conversations.urls", namespace="django_ai_conversations")
+    ),
 ]

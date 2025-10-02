@@ -19,7 +19,7 @@ class ConversationContext:
     def __init__(self, session_id, request=None):
         self.session_id = session_id
         self.request = request
-        self.channel_name = f"conversation-session-{session_id}"
+        self.channel_name = f"private-conversation-session-{session_id}"
 
         # Initialize Pusher client
         pusher_config = getattr(settings, "DJANGO_AI_PUSHER", {})

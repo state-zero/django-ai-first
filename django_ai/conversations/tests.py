@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.test import override_settings, RequestFactory
 from django.urls import reverse
 from rest_framework.test import APITestCase
+from rest_framework import status
 from pydantic import BaseModel
 
 from django_ai.conversations.models import (
@@ -428,3 +429,257 @@ class FullConversationFlowTest(APITestCase):
             print(f"✅ Clean context system working properly")
             print(f"✅ Request passing working properly")
             print(f"{'='*60}")
+
+# django_ai/conversations/tests.py (add this new test class)
+
+class PusherAuthTest(APITestCase):
+    """Test Pusher authentication endpoint"""
+
+    def setUp(self):
+        """Set up test environment"""
+        # Create test users
+        self.user1 = User.objects.create_user(
+            username="user1",
+            password="testpass123",
+            email="user1@test.com",
+        )
+        self.user2 = User.objects.create_user(
+            username="user2",
+            password="testpass123",
+            email="user2@test.com",
+        )
+
+        # Check Pusher configuration
+        from django.conf import settings
+        pusher_config = getattr(settings, "DJANGO_AI_PUSHER", {})
+        if not pusher_config.get("KEY"):
+            self.skipTest(
+                "DJANGO_AI_PUSHER not configured - skipping Pusher auth tests"
+            )
+
+        # Register a simple test agent
+        register_agent("test_agent", FullFeatureTestAgent)
+
+    def test_authenticated_user_can_access_own_session(self):
+        """Test that authenticated users can only access their own conversation sessions"""
+        # Create session for user1
+        self.client.force_authenticate(user=self.user1)
+        
+        factory = RequestFactory()
+        request = factory.post("/test")
+        request.user = self.user1
+
+        from django_ai.conversations.actions import start_conversation
+        result = start_conversation(
+            agent_path="test_agent",
+            context_kwargs={},
+            request=request,
+        )
+        
+        session_id = result["session_id"]
+        session = ConversationSession.objects.get(id=session_id)
+        
+        # User1 should be able to authenticate
+        response = self.client.post(
+            reverse('django_ai_conversations:pusher_auth'),
+            {
+                'socket_id': '123.456',
+                'channel_name': f'private-conversation-session-{session_id}'
+            },
+            format='json'
+        )
+        
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('auth', response.data)
+        print(f"✅ User1 successfully authenticated to their own session")
+
+    def test_authenticated_user_cannot_access_other_session(self):
+        """Test that authenticated users cannot access other users' sessions"""
+        # Create session for user1
+        self.client.force_authenticate(user=self.user1)
+        
+        factory = RequestFactory()
+        request = factory.post("/test")
+        request.user = self.user1
+
+        from django_ai.conversations.actions import start_conversation
+        result = start_conversation(
+            agent_path="test_agent",
+            context_kwargs={},
+            request=request,
+        )
+        
+        session_id = result["session_id"]
+        
+        # Try to authenticate as user2
+        self.client.force_authenticate(user=self.user2)
+        
+        response = self.client.post(
+            reverse('django_ai_conversations:pusher_auth'),
+            {
+                'socket_id': '123.456',
+                'channel_name': f'private-conversation-session-{session_id}'
+            },
+            format='json'
+        )
+        
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('error', response.data)
+        print(f"✅ User2 correctly denied access to User1's session")
+
+    def test_anonymous_user_can_access_own_session(self):
+        """Test that anonymous users can access their own sessions via anonymous_id"""
+        # Create anonymous session
+        anonymous_id = "anon_123456"
+        
+        session = ConversationSession.objects.create(
+            agent_path="test_agent",
+            anonymous_id=anonymous_id,
+            context={}
+        )
+        
+        # Simulate anonymous request with session
+        session_data = self.client.session
+        session_data['anonymous_id'] = anonymous_id
+        session_data.save()
+        
+        response = self.client.post(
+            reverse('django_ai_conversations:pusher_auth'),
+            {
+                'socket_id': '123.456',
+                'channel_name': f'private-conversation-session-{session.id}',
+                'anonymous_id': anonymous_id  # Also pass in request data as fallback
+            },
+            format='json'
+        )
+        
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('auth', response.data)
+        print(f"✅ Anonymous user successfully authenticated to their own session")
+
+    def test_anonymous_user_cannot_access_other_session(self):
+        """Test that anonymous users cannot access sessions with different anonymous_id"""
+        # Create anonymous session
+        session = ConversationSession.objects.create(
+            agent_path="test_agent",
+            anonymous_id="anon_123",
+            context={}
+        )
+        
+        # Try to access with different anonymous_id
+        response = self.client.post(
+            reverse('django_ai_conversations:pusher_auth'),
+            {
+                'socket_id': '123.456',
+                'channel_name': f'private-conversation-session-{session.id}',
+                'anonymous_id': 'anon_456'  # Different ID
+            },
+            format='json'
+        )
+        
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('error', response.data)
+        print(f"✅ Anonymous user correctly denied access to different session")
+
+    def test_invalid_channel_name(self):
+        """Test that invalid channel names are rejected"""
+        self.client.force_authenticate(user=self.user1)
+        
+        response = self.client.post(
+            reverse('django_ai_conversations:pusher_auth'),
+            {
+                'socket_id': '123.456',
+                'channel_name': 'invalid-channel-name'
+            },
+            format='json'
+        )
+        
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('error', response.data)
+        print(f"✅ Invalid channel name correctly rejected")
+
+    def test_missing_parameters(self):
+        """Test that missing required parameters are rejected"""
+        self.client.force_authenticate(user=self.user1)
+        
+        # Missing socket_id
+        response = self.client.post(
+            reverse('django_ai_conversations:pusher_auth'),
+            {
+                'channel_name': 'private-conversation-session-123'
+            },
+            format='json'
+        )
+        
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        
+        # Missing channel_name
+        response = self.client.post(
+            reverse('django_ai_conversations:pusher_auth'),
+            {
+                'socket_id': '123.456'
+            },
+            format='json'
+        )
+        
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        print(f"✅ Missing parameters correctly rejected")
+
+    def test_nonexistent_session(self):
+        """Test that non-existent sessions are rejected"""
+        self.client.force_authenticate(user=self.user1)
+        
+        fake_session_id = "00000000-0000-0000-0000-000000000000"
+        
+        response = self.client.post(
+            reverse('django_ai_conversations:pusher_auth'),
+            {
+                'socket_id': '123.456',
+                'channel_name': f'private-conversation-session-{fake_session_id}'
+            },
+            format='json'
+        )
+        
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertIn('error', response.data)
+        print(f"✅ Non-existent session correctly rejected")
+
+    def test_pusher_auth_response_format(self):
+        """Test that successful auth returns proper Pusher format"""
+        # Create session for user1
+        self.client.force_authenticate(user=self.user1)
+        
+        factory = RequestFactory()
+        request = factory.post("/test")
+        request.user = self.user1
+
+        from django_ai.conversations.actions import start_conversation
+        result = start_conversation(
+            agent_path="test_agent",
+            context_kwargs={},
+            request=request,
+        )
+        
+        session_id = result["session_id"]
+        
+        response = self.client.post(
+            reverse('django_ai_conversations:pusher_auth'),
+            {
+                'socket_id': '123.456',
+                'channel_name': f'private-conversation-session-{session_id}'
+            },
+            format='json'
+        )
+        
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        
+        # Pusher auth response should have 'auth' key with signature
+        self.assertIn('auth', response.data)
+        
+        # The auth value should be in format: "app_key:signature"
+        auth_value = response.data['auth']
+        self.assertIsInstance(auth_value, str)
+        self.assertIn(':', auth_value)
+        
+        print(f"✅ Pusher auth response format is correct")
+        print(f"   Auth signature: {auth_value[:20]}...")
