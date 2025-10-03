@@ -2,7 +2,7 @@ from typing import Optional
 from datetime import timedelta
 from django_q.tasks import async_task
 
-TASK_PATH = "pilot.automationqueues.tasks"
+TASK_PATH = "django_ai.automation.queues.tasks"
 
 class Q2Executor:
     def queue_task(self, task_name: str, *args, delay: Optional[timedelta] = None):
