@@ -9,6 +9,7 @@ import base64
 from django.utils import timezone
 
 from .text_extractor import TikaTextExtractor
+from .tasks import process_conversation_message
 
 User = get_user_model()
 
@@ -97,6 +98,19 @@ class ConversationMessage(models.Model):
     def __str__(self):
         return f"{self.message_type}: {self.content[:50]}"
 
+    def save(self, *args, **kwargs):
+        # _state.adding is True only for new records, even with default pk
+        is_new = self._state.adding
+        
+        super().save(*args, **kwargs)
+        
+        # After save, if this is a new user message, queue processing
+        if is_new and self.message_type == "user":
+            from django_ai.automation.workflows.core import engine
+            if engine.executor:
+                engine.executor.queue_task(
+                    "process_conversation_message", self.id, None
+                )
 
 class File(models.Model):
     """File attachments for conversations"""

@@ -33,41 +33,32 @@ class ConversationService:
 
     @classmethod
     def send_message(cls, session_id, message, user=None, request=None, files=None):
-        """Process message with clean context separation"""
+        """Process message with clean context separation (sync only)."""
         from .models import ConversationSession, ConversationMessage
         from .context import _current_session, _current_request, _auto_save_context
 
         session = ConversationSession.objects.get(id=session_id)
 
-        # Set context variables so get_context() can auto-load from session
-        _current_session.set(session)
-        _current_request.set(request)
+        # Set context vars (remember tokens so we can restore them)
+        sess_token = _current_session.set(session)
+        req_token  = _current_request.set(request)
 
         try:
             # Create agent instance
             agent_class = cls.resolve_agent(session.agent_path)
             agent_instance = agent_class()
 
-            # Call agent with clean signature
-            if hasattr(agent_instance, "get_response"):
-                if inspect.iscoroutinefunction(agent_instance.get_response):
-                    response = asyncio.run(
-                        agent_instance.get_response(message, request=request, files=files)
-                    )
-                else:
-                    response = agent_instance.get_response(message, request=request, files=files)
-            else:
-                # Function-based agent
-                if inspect.iscoroutinefunction(agent_instance):
-                    response = asyncio.run(agent_instance(message, request=request, files=files))
-                else:
-                    response = agent_instance(message, request=request, files=files)
+            # Pick callable: method get_response or the instance itself
+            call = agent_instance.get_response if hasattr(agent_instance, "get_response") else agent_instance
+
+            # Call synchronously
+            response = call(message, request=request, files=files)
 
             # Save context changes
             _auto_save_context()
 
             # Store agent response
-            if response:
+            if response is not None:
                 ConversationMessage.objects.create(
                     session=session, message_type="agent", content=str(response)
                 )
@@ -85,3 +76,8 @@ class ConversationService:
                 session=session, message_type="system", content=f"Error: {str(e)}"
             )
             return {"status": "error", "error": str(e), "session_id": str(session_id)}
+
+        finally:
+            # Restore original context values
+            _current_session.reset(sess_token)
+            _current_request.reset(req_token)

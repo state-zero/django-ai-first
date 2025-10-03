@@ -1,4 +1,3 @@
-import asyncio
 import json
 import time
 import threading
@@ -67,7 +66,7 @@ class PusherEventCapture:
 
 
 class FullFeatureTestAgent(ConversationAgent):
-    """Test agent using the clean context system"""
+    """Test agent using the clean context system (sync-only)"""
 
     class Context(BaseModel):
         user_id: int = 0
@@ -77,8 +76,7 @@ class FullFeatureTestAgent(ConversationAgent):
     @classmethod
     def create_context(cls, request=None, **kwargs):
         """Create agent context from request and kwargs"""
-        user = request.user if request and request.user.is_authenticated else None
-
+        user = request.user if request and getattr(request.user, "is_authenticated", False) else None
         return cls.Context(
             user_id=user.id if user else 0,
             user_name=getattr(user, "username", "Anonymous") if user else "Anonymous",
@@ -101,8 +99,8 @@ class FullFeatureTestAgent(ConversationAgent):
         is_admin = user_name == "integrationtest"  # Our test user
         return f"User {user_name} ({'admin' if is_admin else 'regular'}) permissions verified"
 
-    async def get_response(self, message, request=None, files=None, **kwargs):
-        """Main response handler with clean signature"""
+    def get_response(self, message, request=None, files=None, **kwargs):
+        """Main response handler with clean signature (sync)"""
         print(f"🤖 Agent processing: {message}")
 
         # Get agent context
@@ -116,8 +114,8 @@ class FullFeatureTestAgent(ConversationAgent):
             return f"Basic response to: {message}"
 
         elif "stream" in message_lower:
-            # Streaming response
-            return await self._streaming_response(message)
+            # “Streaming” response (sync) — still emits Pusher chunk events via ResponseStream
+            return self._streaming_response(message)
 
         elif "user info" in message_lower:
             # Call agent function with context injection
@@ -150,19 +148,19 @@ class FullFeatureTestAgent(ConversationAgent):
             ctx.conversation_count += 1
             return f"Echo #{ctx.conversation_count}: {message}"
 
-    async def _streaming_response(self, original_message):
-        """Generate a streaming response with multiple chunks"""
+    def _streaming_response(self, original_message):
+        """Generate a streaming-like response with multiple chunks (sync)"""
         print("🔄 Starting streaming response...")
 
         with ResponseStream() as stream:
             stream.write("🔄 Processing your streaming request")
-            await asyncio.sleep(0.1)
+            time.sleep(0.01)
 
             stream.write("... analyzing content")
-            await asyncio.sleep(0.1)
+            time.sleep(0.01)
 
             stream.write("... generating response")
-            await asyncio.sleep(0.1)
+            time.sleep(0.01)
 
             stream.write(
                 f"... ✅ Complete! Your message '{original_message}' has been processed with streaming."

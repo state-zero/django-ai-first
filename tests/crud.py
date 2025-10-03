@@ -15,7 +15,6 @@ from django_ai.conversations.models import (
 from django_ai.conversations.hooks import (
     set_message_type,
     set_processing_status,
-    process_user_message,
     set_user_context,
 )
 
@@ -47,7 +46,7 @@ registry.register(
     ModelConfig(
         model=ConversationMessage,
         pre_hooks=[set_message_type, set_processing_status],
-        post_hooks=[process_user_message],
+        post_hooks=[],
         permissions=[AllowAllPermission]
     ),
 )
