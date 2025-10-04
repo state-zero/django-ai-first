@@ -112,6 +112,22 @@ class ConversationMessage(models.Model):
                     "process_conversation_message", self.id, None
                 )
 
+class ConversationWidget(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    session = models.ForeignKey(
+        ConversationSession, 
+        on_delete=models.CASCADE, 
+        related_name="widgets"
+    )
+    
+    widget_type = models.CharField(max_length=100)
+    widget_data = models.JSONField()
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['created_at']
+
 class File(models.Model):
     """File attachments for conversations"""
 

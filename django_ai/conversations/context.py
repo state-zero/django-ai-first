@@ -5,6 +5,8 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Optional, Any
+
+from .models import ConversationWidget
 from ..utils.json import safe_model_dump
 
 # Thread-safe context storage
@@ -85,8 +87,20 @@ def display_widget(widget_type, data):
             "display_widget() must be called within conversation context"
         )
 
+    # Create the database record
+    widget = ConversationWidget.objects.create(
+        session=session,
+        widget_type=widget_type,
+        widget_data=data
+    )
+
+    # Send websocket event for real-time display
     conv_context = ConversationContext(str(session.id), request)
-    conv_context._send_event("widget", {"widget_type": widget_type, "data": data})
+    conv_context._send_event("widget", {
+        "widget_type": widget_type, 
+        "data": data,
+        "widget_id": str(widget.id)  # Include ID for tracking
+    })
 
 
 class ResponseStream:
