@@ -123,10 +123,10 @@ class ConversationWidget(models.Model):
     widget_type = models.CharField(max_length=100)
     widget_data = models.JSONField()
     
-    created_at = models.DateTimeField(auto_now_add=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
     
     class Meta:
-        ordering = ['created_at']
+        ordering = ['timestamp']
 
 class File(models.Model):
     """File attachments for conversations"""
