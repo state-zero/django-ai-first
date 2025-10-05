@@ -1,6 +1,5 @@
 from django.db import models
 from django.contrib.auth import get_user_model
-from django.db import models, transaction
 import uuid
 import mimetypes
 import os
@@ -106,19 +105,12 @@ class ConversationMessage(models.Model):
         super().save(*args, **kwargs)
         
         # After save, if this is a new user message, queue processing
-        if is_new and self.message_type in ["user", "system"]:
-            # Use on_commit to ensure the task is queued only after 
-            # the transaction is successfully committed. This means even sync
-            # processors will store the messages in the correct order
-            transaction.on_commit(self._queue_processing)
-    
-    def _queue_processing(self):
-        """Queue the message processing task"""
-        from django_ai.automation.workflows.core import engine
-        if engine.executor:
-            engine.executor.queue_task(
-                "process_conversation_message", self.id, None
-            )
+        if is_new and self.message_type == "user":
+            from django_ai.automation.workflows.core import engine
+            if engine.executor:
+                engine.executor.queue_task(
+                    "process_conversation_message", self.id, None
+                )
 
 class ConversationWidget(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)

@@ -119,6 +119,7 @@ class MessagingFlowHappyPathTest(APITransactionTestCase):
         print(f"   ✅ User message created: {user_message.id}")
         print(f"      Content: {user_message.content}")
         print(f"      Type: {user_message.message_type}")
+        print(f"      Timestamp: {user_message.timestamp}")
         print(f"      Initial status: {user_message.processing_status}")
         
         # Verify pre-hooks worked
@@ -147,14 +148,15 @@ class MessagingFlowHappyPathTest(APITransactionTestCase):
         print(f"   ✅ Agent response created: {agent_message.id}")
         print(f"      Content: {agent_message.content}")
         print(f"      Type: {agent_message.message_type}")
+        print(f"      Timestamp: {agent_message.timestamp}")
         
         # Verify agent response content
         self.assertEqual(agent_message.message_type, "agent")
         self.assertIn("Echo #1", agent_message.content)
         self.assertIn("Hello, agent!", agent_message.content)
         
-        # Step 3: Verify complete conversation
-        print(f"\n📊 Step 3: Verifying complete conversation...")
+        # Step 3: Verify complete conversation and message ordering
+        print(f"\n📊 Step 3: Verifying complete conversation and ordering...")
         
         all_messages = ConversationMessage.objects.filter(
             session=self.session
@@ -168,11 +170,26 @@ class MessagingFlowHappyPathTest(APITransactionTestCase):
         self.assertEqual(messages_list[0].message_type, "user")
         self.assertEqual(messages_list[1].message_type, "agent")
         
+        # VERIFY TIMESTAMP ORDERING
+        print(f"\n   📅 Timestamp verification:")
+        print(f"      User message timestamp:  {messages_list[0].timestamp}")
+        print(f"      Agent message timestamp: {messages_list[1].timestamp}")
+        
+        self.assertLess(
+            messages_list[0].timestamp,
+            messages_list[1].timestamp,
+            "Agent message should have a later timestamp than user message"
+        )
+        
+        time_diff = (messages_list[1].timestamp - messages_list[0].timestamp).total_seconds()
+        print(f"      Time difference: {time_diff:.3f} seconds")
+        print(f"      ✅ Timestamps are correctly ordered")
+        
         print(f"\n   Conversation history:")
         for i, msg in enumerate(messages_list, 1):
             print(f"   {i}. [{msg.message_type.upper()}] {msg.content}")
         
-        # Step 4: Send another message to verify context persistence
+        # Step 4: Send another message to verify context persistence and ordering
         print(f"\n📝 Step 4: Testing context persistence with second message...")
         
         response2 = self.client.post(
@@ -197,8 +214,9 @@ class MessagingFlowHappyPathTest(APITransactionTestCase):
         # Get the second message ID and wait for processing
         user_message_2_id = response2.data['data']['data'][0]
         print(f"   ⏳ Waiting for second message processing...")
-        self.wait_for_processing(user_message_2_id)
+        user_message_2 = self.wait_for_processing(user_message_2_id)
         print(f"   ✅ Second message processed")
+        print(f"      Timestamp: {user_message_2.timestamp}")
         
         # Check agent responses
         agent_messages = ConversationMessage.objects.filter(
@@ -210,10 +228,32 @@ class MessagingFlowHappyPathTest(APITransactionTestCase):
         
         second_response = agent_messages.last()
         print(f"   ✅ Second agent response: {second_response.content}")
+        print(f"      Timestamp: {second_response.timestamp}")
         
         # Verify context was preserved (message count incremented)
         self.assertIn("Echo #2", second_response.content)
         self.assertIn("Second message!", second_response.content)
+        
+        # Verify ordering of all messages
+        print(f"\n   📅 Complete conversation timestamp verification:")
+        all_messages = ConversationMessage.objects.filter(
+            session=self.session
+        ).order_by('timestamp')
+        
+        messages_list = list(all_messages)
+        self.assertEqual(len(messages_list), 4, "Should have 4 total messages")
+        
+        # Verify each message comes after the previous one
+        for i in range(len(messages_list) - 1):
+            print(f"      Message {i+1} ({messages_list[i].message_type}): {messages_list[i].timestamp}")
+            self.assertLess(
+                messages_list[i].timestamp,
+                messages_list[i+1].timestamp,
+                f"Message {i+2} should have a later timestamp than message {i+1}"
+            )
+        
+        print(f"      Message {len(messages_list)} ({messages_list[-1].message_type}): {messages_list[-1].timestamp}")
+        print(f"      ✅ All timestamps are correctly ordered")
         
         # Final summary
         final_count = ConversationMessage.objects.filter(session=self.session).count()
@@ -226,5 +266,6 @@ class MessagingFlowHappyPathTest(APITransactionTestCase):
         print(f"✅ Agent processed message and responded")
         print(f"✅ Agent response saved to database")
         print(f"✅ Context persisted across messages")
+        print(f"✅ Timestamps are correctly ordered")
         print(f"   Total messages in conversation: {final_count}")
         print(f"{'='*60}\n")
