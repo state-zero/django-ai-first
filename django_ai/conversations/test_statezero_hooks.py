@@ -1,7 +1,7 @@
 import time
 from django.contrib.auth import get_user_model
 from django.urls import reverse
-from rest_framework.test import APITestCase
+from rest_framework.test import APITransactionTestCase
 from rest_framework import status
 from pydantic import BaseModel
 
@@ -36,7 +36,7 @@ class SimpleTestAgent(ConversationAgent):
         return f"Echo #{self.context.message_count}: {message}"
 
 
-class MessagingFlowHappyPathTest(APITestCase):
+class MessagingFlowHappyPathTest(APITransactionTestCase):
     """Simple happy path test for the complete messaging flow via StateZero"""
 
     def setUp(self):
@@ -67,6 +67,19 @@ class MessagingFlowHappyPathTest(APITestCase):
         print(f"   Session: {self.session.id}")
         print(f"   User: {self.user.username}")
         print(f"{'='*60}\n")
+
+    def wait_for_processing(self, message_id, timeout=5):
+        """Wait for a message to be processed"""
+        start = time.time()
+        while time.time() - start < timeout:
+            message = ConversationMessage.objects.get(id=message_id)
+            if message.processing_status == "completed":
+                return message
+            time.sleep(0.1)  # Poll every 100ms
+        
+        # Timeout - raise assertion error
+        message = ConversationMessage.objects.get(id=message_id)
+        self.fail(f"Message processing timed out. Status: {message.processing_status}")
 
     def test_complete_messaging_flow(self):
         """Test the complete happy path: create message -> hooks run -> agent responds"""
@@ -106,16 +119,19 @@ class MessagingFlowHappyPathTest(APITestCase):
         print(f"   ✅ User message created: {user_message.id}")
         print(f"      Content: {user_message.content}")
         print(f"      Type: {user_message.message_type}")
-        print(f"      Status: {user_message.processing_status}")
+        print(f"      Initial status: {user_message.processing_status}")
         
         # Verify pre-hooks worked
         self.assertEqual(user_message.message_type, "user")
         
-        # With SynchronousExecutor, processing happens immediately
-        # So status should already be 'completed' (not 'pending')
+        # Wait for processing to complete
+        print(f"   ⏳ Waiting for processing to complete...")
+        user_message = self.wait_for_processing(user_message_id)
+        print(f"   ✅ Processing completed")
+        
         self.assertEqual(user_message.processing_status, "completed")
         
-        # Step 2: Verify agent response was created (no need to wait)
+        # Step 2: Verify agent response was created
         print(f"\n🤖 Step 2: Checking for agent response...")
         
         agent_messages = ConversationMessage.objects.filter(
@@ -178,7 +194,11 @@ class MessagingFlowHappyPathTest(APITestCase):
         
         self.assertEqual(response2.status_code, status.HTTP_200_OK)
         
-        # No need to sleep - SynchronousExecutor processes immediately
+        # Get the second message ID and wait for processing
+        user_message_2_id = response2.data['data']['data'][0]
+        print(f"   ⏳ Waiting for second message processing...")
+        self.wait_for_processing(user_message_2_id)
+        print(f"   ✅ Second message processed")
         
         # Check agent responses
         agent_messages = ConversationMessage.objects.filter(
@@ -196,14 +216,15 @@ class MessagingFlowHappyPathTest(APITestCase):
         self.assertIn("Second message!", second_response.content)
         
         # Final summary
+        final_count = ConversationMessage.objects.filter(session=self.session).count()
         print(f"\n{'='*60}")
         print(f"🎉 HAPPY PATH TEST COMPLETE!")
         print(f"{'='*60}")
         print(f"✅ User message created via StateZero")
         print(f"✅ Pre-hooks set message_type and processing_status")
-        print(f"✅ Signal triggered message processing immediately")
+        print(f"✅ Signal triggered message processing after commit")
         print(f"✅ Agent processed message and responded")
         print(f"✅ Agent response saved to database")
         print(f"✅ Context persisted across messages")
-        print(f"   Total messages in conversation: {all_messages.count() + agent_messages.count()}")
+        print(f"   Total messages in conversation: {final_count}")
         print(f"{'='*60}\n")
