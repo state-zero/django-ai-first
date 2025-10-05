@@ -1,4 +1,4 @@
-from django.db import models
+from django.db import models, transaction
 from django.contrib.auth import get_user_model
 import uuid
 import mimetypes
@@ -99,19 +99,21 @@ class ConversationMessage(models.Model):
         return f"{self.message_type}: {self.content[:50]}"
 
     def save(self, *args, **kwargs):
-        # _state.adding is True only for new records, even with default pk
         is_new = self._state.adding
         
         super().save(*args, **kwargs)
         
-        # After save, if this is a new user message, queue processing
+        # Queue the task AFTER the transaction commits
         if is_new and self.message_type == "user":
-            from django_ai.automation.workflows.core import engine
-            if engine.executor:
-                engine.executor.queue_task(
-                    "process_conversation_message", self.id, None
-                )
-
+            def queue_processing():
+                from django_ai.automation.workflows.core import engine
+                if engine.executor:
+                    engine.executor.queue_task(
+                        "process_conversation_message", self.id, None
+                    )
+            
+            transaction.on_commit(queue_processing)
+            
 class ConversationWidget(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     session = models.ForeignKey(
