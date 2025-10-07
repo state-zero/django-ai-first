@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from contextvars import ContextVar
 from django.db import transaction
 from django.db.models import Q
-from .models import WorkflowRun, WorkflowStatus
+from .models import WorkflowRun, WorkflowStatus, StepExecution
 from django.utils import timezone
 from ...utils.json import safe_model_dump
 
@@ -28,6 +28,7 @@ class StepResult:
 @dataclass
 class Goto(StepResult):
     step: str
+    progress: Optional[float] = None  # 0.0-100.0
 
 
 @dataclass
@@ -46,8 +47,8 @@ class Fail(StepResult):
 
 
 # Helper functions
-def goto(step: str) -> Goto:
-    return Goto(step)
+def goto(step: str, progress: Optional[float] = None) -> Goto:
+    return Goto(step, progress)
 
 
 def sleep(duration: timedelta) -> Sleep:
@@ -487,6 +488,13 @@ class WorkflowEngine:
         workflow_cls = _workflows.get(run.name)
 
         if isinstance(result, Goto):
+
+            StepExecution.objects.create(
+                workflow_run=run,
+                step_name=run.current_step,
+                status='completed'
+            )
+
             # Convert method reference to method name
             if callable(result.step):
                 step_name = result.step.__name__
@@ -499,7 +507,10 @@ class WorkflowEngine:
 
             run.current_step = step_name
 
-            # --- KEY CHANGE: Check if the target step requires suspension ---
+            if result.progress is not None:
+                run.progress = max(0.0, min(100.0, result.progress))  # Clamp 0.0-100.0
+
+            # --- Check if the target step requires suspension ---
             if getattr(target, "_has_statezero_action", False):
                 run.status = WorkflowStatus.SUSPENDED
                 run.save()
@@ -522,7 +533,14 @@ class WorkflowEngine:
             run.save()
 
         elif isinstance(result, Complete):
+            StepExecution.objects.create(
+                workflow_run=run,
+                step_name=run.current_step,
+                status='completed'
+            )
+
             run.status = WorkflowStatus.COMPLETED
+            run.progress = 1.0
             if result.result:
                 context = workflow_cls.Context.model_validate(run.data)
                 for key, value in result.result.items():
@@ -532,6 +550,13 @@ class WorkflowEngine:
             run.save()
 
         elif isinstance(result, Fail):
+            StepExecution.objects.create(
+                workflow_run=run,
+                step_name=run.current_step,
+                status='failed',
+                error=result.reason
+            )
+
             run.status = WorkflowStatus.FAILED
             run.error = result.reason
             run.save()
@@ -599,6 +624,13 @@ class WorkflowEngine:
         error_msg = f"{str(error)}\n{traceback.format_exc()}"
         if len(error_msg) > 32768:
             error_msg = error_msg[:32768] + "\n... (truncated)"
+
+        StepExecution.objects.create(
+            workflow_run=run,
+            step_name=step_name,
+            status='failed',
+            error=error_msg
+        )
 
         run.error = error_msg
         run.status = WorkflowStatus.FAILED

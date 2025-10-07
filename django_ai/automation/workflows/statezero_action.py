@@ -1,5 +1,3 @@
-# django_ai/automation/workflows/statezero_action.py
-
 import inspect
 import logging
 from rest_framework import serializers
