@@ -15,6 +15,7 @@ from django.db.models import Q
 from .models import WorkflowRun, WorkflowStatus, StepExecution
 from django.utils import timezone
 from ...utils.json import safe_model_dump
+from .metadata import StepDisplayMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,8 @@ class Sleep(StepResult):
 @dataclass
 class Complete(StepResult):
     result: Optional[Dict[str, Any]] = None
+    display_title: Optional[str] = None
+    display_subtitle: Optional[str] = None
 
 
 @dataclass
@@ -59,25 +62,44 @@ def wait_for_event(
     event_name: str,
     timeout: Optional[timedelta] = None,
     on_timeout: Optional[str] = None,
+    display_title: Optional[str] = None,
+    display_subtitle: Optional[str] = None,
+    display_waiting_for: Optional[str] = None,
 ):
-    """Decorator to make a step wait for an event before executing."""
-
+    """
+    Decorator to make a step wait for an event before executing.
+    
+    Args:
+        event_name: Name of the event to wait for
+        timeout: Optional timeout duration
+        on_timeout: Optional step to go to on timeout
+        display_title: Title to show while waiting (for frontend)
+        display_subtitle: Subtitle to show while waiting (for frontend)
+        display_waiting_for: Description of what we're waiting for (for frontend)
+    """
     def decorator(func):
         func._is_event_wait_step = True
         func._wait_signal = f"event:{event_name}"
         func._wait_timeout = timeout
+        
         # Convert method reference to name
         if on_timeout and callable(on_timeout):
             func._wait_on_timeout_step = on_timeout.__name__
         else:
             func._wait_on_timeout_step = on_timeout
+        
+        # Store display metadata on the function
+        func._wait_display_title = display_title
+        func._wait_display_subtitle = display_subtitle
+        func._wait_display_waiting_for = display_waiting_for
+        
         return func
-
+    
     return decorator
 
 
-def complete(**result) -> Complete:
-    return Complete(result)
+def complete(display_title: Optional[str] = None, display_subtitle: Optional[str] = None, **result) -> Complete:
+    return Complete(result=result if result else None, display_title=display_title, display_subtitle=display_subtitle)
 
 
 def fail(reason: str) -> Fail:
@@ -263,17 +285,27 @@ def event_workflow(
     return decorator
 
 
-def step(retry: Optional[Retry] = None, start: bool = False):
-    """Decorator for workflow steps"""
-
+def step(
+    retry: Optional[Retry] = None, 
+    start: bool = False,
+    display: Optional[StepDisplayMetadata] = None
+):
+    """
+    Decorator for workflow steps
+    
+    Args:
+        retry: Retry policy for this step
+        start: Whether this is the starting step
+        display: Frontend display metadata (titles, descriptions, field groupings)
+    """
     def decorator(func):
         func._is_workflow_step = True
         func._is_start_step = start
         func._step_retry = retry
+        func._display_metadata = display
         return func
 
     return decorator
-
 
 # Main workflow engine
 class WorkflowEngine:
@@ -325,6 +357,11 @@ class WorkflowEngine:
             )
             timeout = getattr(start_step_method, "_wait_timeout", None)
             run.wake_at = timezone.now() + timeout if timeout else None
+            run.waiting_display = {
+                'display_title': getattr(start_step_method, "_wait_display_title", None),
+                'display_subtitle': getattr(start_step_method, "_wait_display_subtitle", None),
+                'display_waiting_for': getattr(start_step_method, "_wait_display_waiting_for", None)
+            }
             run.save()
 
         return run
@@ -520,6 +557,11 @@ class WorkflowEngine:
                 run.on_timeout_step = getattr(target, "_wait_on_timeout_step", "") or ""
                 timeout = getattr(target, "_wait_timeout", None)
                 run.wake_at = timezone.now() + timeout if timeout else None
+                run.waiting_display = {
+                    'display_title': getattr(target, "_wait_display_title", None),
+                    'display_subtitle': getattr(target, "_wait_display_subtitle", None),
+                    'display_waiting_for': getattr(target, "_wait_display_waiting_for", None)
+                }
                 run.save()
             else:
                 # It's a normal step, queue for immediate execution
@@ -547,6 +589,16 @@ class WorkflowEngine:
                     if hasattr(context, key):
                         setattr(context, key, value)
                 run.data = safe_model_dump(context)
+
+            # Store completion display as structured JSON - used in the frontend only!
+            run.completion_display = {
+                'display_title': result.display_title,
+                'display_subtitle': result.display_subtitle
+            }
+            
+            # Clear waiting display - used in the frontend only!
+            run.waiting_display = {}
+
             run.save()
 
         elif isinstance(result, Fail):
