@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Union, Tuple, Dict, Any, Optional
 import io
 import time
+import os
 
 from .exceptions import OCRException
 
@@ -82,7 +83,7 @@ class TikaParser(BaseParser):
 
         try:
             # Determine server URL from settings
-            server_url = self.server_url or getattr(settings, 'TIKA_SERVER_ENDPOINT', None)
+            server_url = self.server_url or getattr(settings, 'TIKA_SERVER_ENDPOINT', None) or os.getenv('TIKA_SERVER_ENDPOINT', None)
 
             # Parse based on input type
             if isinstance(file_source, (str, Path)):
