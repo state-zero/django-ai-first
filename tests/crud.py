@@ -16,6 +16,10 @@ from django_ai.conversations.hooks import (
     set_processing_status,
     set_user_context,
 )
+from django_ai.files.models import (
+    ManagedFile,
+    Folder
+)
 
 User = get_user_model()
 
@@ -46,6 +50,24 @@ registry.register(
         model=ConversationMessage,
         pre_hooks=[set_message_type, set_processing_status],
         post_hooks=[],
+        permissions=[AllowAllPermission]
+    ),
+)
+
+# Register Folder with StateZero
+registry.register(
+    Folder,
+    ModelConfig(
+        model=Folder,
+        permissions=[AllowAllPermission]
+    ),
+)
+
+# Register ManagedFile with StateZero
+registry.register(
+    ManagedFile,
+    ModelConfig(
+        model=ManagedFile,
         permissions=[AllowAllPermission]
     ),
 )

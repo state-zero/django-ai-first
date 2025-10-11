@@ -63,8 +63,7 @@ class ConversationMessage(models.Model):
     # For widgets
     component_type = models.CharField(max_length=100, blank=True)
     component_data = models.JSONField(default=dict)
-    # Note: File handling moved to django_ai.files.models.ManagedFile
-    # files = models.ManyToManyField("django_ai.files.ManagedFile", blank=True, related_name="conversation_messages")
+    files = models.ManyToManyField("files.ManagedFile", blank=True, related_name="conversation_messages")
 
     # Processing state for optimistic updates
     PROCESSING_STATUS = [
