@@ -5,8 +5,7 @@ from pydantic import BaseModel
 from rest_framework import serializers
 from django_ai.automation.workflows.core import workflow, step, get_context, goto, complete
 from django_ai.automation.workflows.statezero_action import statezero_action
-from django_ai.automation.workflows.metadata import StepDisplayMetadata, FieldGroup
-
+from statezero.core.classes import DisplayMetadata, FieldGroup
 
 class UserInfoSerializer(serializers.Serializer):
     """Serializer for user information input"""
@@ -43,9 +42,10 @@ class UserOnboardingWorkflow:
         """Initialize the workflow"""
         return goto(self.collect_user_info, progress=0.2)
     
-    @statezero_action(name="collect_user_info", serializer=UserInfoSerializer)
-    @step(
-        display=StepDisplayMetadata(
+    @statezero_action(
+        name="collect_user_info",
+        serializer=UserInfoSerializer,
+        display=DisplayMetadata(
             display_title="Welcome! Let's Get Started",
             display_description="Please provide some basic information to set up your account",
             field_groups=[
@@ -60,8 +60,8 @@ class UserOnboardingWorkflow:
                     field_names=["favorite_color"]
                 )
             ]
-        )
-    )
+        ))
+    @step()
     def collect_user_info(self, name: str, email: str, favorite_color: str):
         """Collect user information"""
         ctx = get_context()
