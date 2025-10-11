@@ -60,51 +60,52 @@ class WorkflowRun(models.Model):
     @property
     def current_step_display(self) -> Optional[Dict]:
         """
-        Get comprehensive display metadata for the current step, this is used exclusively in the frontend
-        when presenting the workflow to the user. It does not impact any of the backend functionality and you
-        should not create backend code that depends on the behaviour of this function.
-        
-        Returns display metadata including:
+        Get workflow runtime display metadata for the current step.
+
+        This is used exclusively in the frontend when presenting workflow state to the user.
+        It does not impact any backend functionality.
+
+        Returns runtime display metadata including:
         - Step type (action, waiting, automated)
-        - Step display info (title, description, field groups, field configs)
         - Completion display (if completed)
         - Waiting display (if suspended)
+
+        Note: Static display metadata (field groups, field configs, etc.) is handled by
+        statezero and should be fetched from the statezero schema/action registry in the frontend.
         """
         from .core import _workflows
-        
+
         result = {
             'status': self.status,
             'current_step': self.current_step,
             'step_type': None,
-            'step_display': None,
             'completion_display': None,
             'waiting_display': None
         }
-        
+
         # Add completion display if completed
         if self.status == WorkflowStatus.COMPLETED and self.completion_display:
             if self.completion_display.get('display_title'):
                 result['completion_display'] = self.completion_display
                 return result  # Return early, no need for other info
-        
+
         # Add waiting display if suspended
         if self.status == WorkflowStatus.SUSPENDED and self.waiting_display:
             if self.waiting_display.get('display_title'):
                 result['waiting_display'] = self.waiting_display
-                # Don't return early - still need step type and display below
-        
-        # Get current step info
+
+        # Get current step info for step type
         if not self.current_step:
             return result
-        
+
         workflow_cls = _workflows.get(self.name)
         if not workflow_cls:
             return result
-        
+
         step_method = getattr(workflow_cls, self.current_step, None)
         if not step_method:
             return result
-        
+
         # Determine step type
         if hasattr(step_method, "_has_statezero_action"):
             result['step_type'] = StepType.ACTION
@@ -112,37 +113,7 @@ class WorkflowRun(models.Model):
             result['step_type'] = StepType.WAITING
         else:
             result['step_type'] = StepType.AUTOMATED
-        
-        # Get step display metadata
-        if getattr(step_method, '_display_metadata'):
-            metadata = step_method._display_metadata
-            
-            step_display = {
-                'display_title': metadata.display_title,
-                'display_description': metadata.display_description,
-                'field_groups': [
-                    {
-                        'display_title': fg.display_title,
-                        'display_description': fg.display_description,
-                        'field_names': fg.field_names
-                    }
-                    for fg in (metadata.field_groups or [])
-                ] if metadata.field_groups else []
-            }
-            
-            if metadata.field_display_configs:
-                step_display['field_display_configs'] = [
-                    {
-                        'field_name': fc.field_name,
-                        'display_component': fc.display_component,
-                        'filter_queryset': fc.filter_queryset,
-                        'display_help_text': fc.display_help_text,
-                    }
-                    for fc in metadata.field_display_configs
-                ]
-            
-            result['step_display'] = step_display
-        
+
         return result
 
     class Meta:

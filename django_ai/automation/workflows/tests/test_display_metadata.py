@@ -14,7 +14,7 @@ from ..core import (
 )
 from ..models import WorkflowRun, WorkflowStatus
 from ..statezero_action import statezero_action
-from ..metadata import StepDisplayMetadata, FieldGroup, FieldDisplayConfig
+from statezero.core.classes import DisplayMetadata, FieldGroup, FieldDisplayConfig
 from django_ai.automation.queues.sync_executor import SynchronousExecutor
 
 class TestDisplayMetadata(TestCase):
@@ -80,8 +80,6 @@ class TestDisplayMetadata(TestCase):
         self.assertIsNotNone(display['completion_display'])
         self.assertEqual(display['completion_display']['display_title'], "Success!")
         self.assertEqual(display['completion_display']['display_subtitle'], "All done")
-        # Should return early, so step_display should be None
-        self.assertIsNone(display['step_display'])
 
     def test_wait_for_event_display_metadata(self):
         """Test that wait_for_event display metadata is stored correctly"""
@@ -169,8 +167,8 @@ class TestDisplayMetadata(TestCase):
         self.assertEqual(display['waiting_display']['display_subtitle'], "Processing your request")
         self.assertEqual(display['waiting_display']['display_waiting_for'], "External system response")
 
-    def test_step_display_metadata_with_field_groups(self):
-        """Test that step display metadata with field groups is returned correctly"""
+    def test_step_display_metadata_passed_to_statezero(self):
+        """Test that display metadata is passed to statezero action registry"""
 
         class TestSerializer(serializers.Serializer):
             workflow_run_id = serializers.IntegerField()
@@ -185,11 +183,8 @@ class TestDisplayMetadata(TestCase):
 
             @statezero_action(
                 name="collect_property_info",
-                serializer=TestSerializer
-            )
-            @step(
-                start=True,
-                display=StepDisplayMetadata(
+                serializer=TestSerializer,
+                display=DisplayMetadata(
                     display_title="Set Up Your Property",
                     display_description="Enter property details to continue",
                     field_groups=[
@@ -206,6 +201,7 @@ class TestDisplayMetadata(TestCase):
                     ]
                 )
             )
+            @step(start=True)
             def collect_info(self, property_name: str, property_type: str, email: str):
                 ctx = get_context()
                 ctx.property_name = property_name
@@ -213,21 +209,30 @@ class TestDisplayMetadata(TestCase):
 
         run = engine.start("step_display_test")
 
-        display = run.current_step_display
-        self.assertIsNotNone(display['step_display'])
-        self.assertEqual(display['step_display']['display_title'], "Set Up Your Property")
-        self.assertEqual(display['step_display']['display_description'], "Enter property details to continue")
-        
+        # Verify the display metadata is in statezero's action registry
+        from statezero.core.actions import action_registry
+        action_info = action_registry.get_action("collect_property_info")
+
+        self.assertIsNotNone(action_info)
+        self.assertIsNotNone(action_info['display'])
+        self.assertEqual(action_info['display'].display_title, "Set Up Your Property")
+        self.assertEqual(action_info['display'].display_description, "Enter property details to continue")
+
         # Check field groups
-        field_groups = display['step_display']['field_groups']
+        field_groups = action_info['display'].field_groups
         self.assertEqual(len(field_groups), 2)
-        self.assertEqual(field_groups[0]['display_title'], "Property Information")
-        self.assertEqual(field_groups[0]['field_names'], ["property_name", "property_type"])
-        self.assertEqual(field_groups[1]['display_title'], "Contact Details")
-        self.assertEqual(field_groups[1]['field_names'], ["email"])
+        self.assertEqual(field_groups[0].display_title, "Property Information")
+        self.assertEqual(field_groups[0].field_names, ["property_name", "property_type"])
+        self.assertEqual(field_groups[1].display_title, "Contact Details")
+        self.assertEqual(field_groups[1].field_names, ["email"])
+
+        # Verify current_step_display only returns runtime info
+        display = run.current_step_display
+        self.assertEqual(display['step_type'], "action")
+        self.assertIsNone(display.get('step_display'))  # No longer included
 
     def test_step_display_metadata_with_field_configs(self):
-        """Test that field display configs are returned correctly"""
+        """Test that field display configs are passed to statezero correctly"""
 
         class TestSerializer(serializers.Serializer):
             workflow_run_id = serializers.IntegerField()
@@ -241,11 +246,8 @@ class TestDisplayMetadata(TestCase):
 
             @statezero_action(
                 name="select_amenities",
-                serializer=TestSerializer
-            )
-            @step(
-                start=True,
-                display=StepDisplayMetadata(
+                serializer=TestSerializer,
+                display=DisplayMetadata(
                     display_title="Select Amenities",
                     display_description="Choose available amenities",
                     field_display_configs=[
@@ -263,26 +265,29 @@ class TestDisplayMetadata(TestCase):
                     ]
                 )
             )
+            @step(start=True)
             def select_amenities_step(self, amenities: list, address: str):
                 return complete()
 
         run = engine.start("field_config_test")
 
-        display = run.current_step_display
-        configs = display['step_display']['field_display_configs']
-        
+        # Verify field configs are in statezero's action registry
+        from statezero.core.actions import action_registry
+        action_info = action_registry.get_action("select_amenities")
+
+        configs = action_info['display'].field_display_configs
         self.assertEqual(len(configs), 2)
-        
+
         amenities_config = configs[0]
-        self.assertEqual(amenities_config['field_name'], "amenities")
-        self.assertEqual(amenities_config['display_component'], "AmenitiesMultiSelect")
-        self.assertEqual(amenities_config['filter_queryset'], {"is_active": True, "category": "essential"})
-        self.assertEqual(amenities_config['display_help_text'], "Select all that apply")
-        
+        self.assertEqual(amenities_config.field_name, "amenities")
+        self.assertEqual(amenities_config.display_component, "AmenitiesMultiSelect")
+        self.assertEqual(amenities_config.filter_queryset, {"is_active": True, "category": "essential"})
+        self.assertEqual(amenities_config.display_help_text, "Select all that apply")
+
         address_config = configs[1]
-        self.assertEqual(address_config['field_name'], "address")
-        self.assertEqual(address_config['display_component'], "AddressAutocomplete")
-        self.assertEqual(address_config['display_help_text'], "Start typing your address")
+        self.assertEqual(address_config.field_name, "address")
+        self.assertEqual(address_config.display_component, "AddressAutocomplete")
+        self.assertEqual(address_config.display_help_text, "Start typing your address")
 
     def test_waiting_display_cleared_on_goto(self):
         """Test that waiting_display is cleared when transitioning to a normal step"""
@@ -445,13 +450,15 @@ class TestDisplayMetadata(TestCase):
             def automated_step(self):
                 return goto(self.action_step)
 
-            @statezero_action(name="test_action", serializer=ActionSerializer)
-            @step(
-                display=StepDisplayMetadata(
+            @statezero_action(
+                name="test_action",
+                serializer=ActionSerializer,
+                display=DisplayMetadata(
                     display_title="Manual Input Required",
                     display_description="Please provide information"
                 )
             )
+            @step()
             def action_step(self, data: str):
                 return goto(self.wait_step)
 
@@ -470,15 +477,19 @@ class TestDisplayMetadata(TestCase):
         # Automated step
         display = run.current_step_display
         self.assertEqual(display['step_type'], "automated")
-        self.assertIsNone(display['step_display'])
+        self.assertIsNone(display.get('step_display'))
 
         # Move to action step
         engine.execute_step(run.id, "automated_step")
         run.refresh_from_db()
         display = run.current_step_display
         self.assertEqual(display['step_type'], "action")
-        self.assertIsNotNone(display['step_display'])
-        self.assertEqual(display['step_display']['display_title'], "Manual Input Required")
+
+        # Display metadata should be in statezero registry, not in current_step_display
+        from statezero.core.actions import action_registry
+        action_info = action_registry.get_action("test_action")
+        self.assertIsNotNone(action_info['display'])
+        self.assertEqual(action_info['display'].display_title, "Manual Input Required")
 
         # Simulate action completion to move to wait step
         from ..core import _workflows, WorkflowContextManager, _current_context

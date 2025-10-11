@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def statezero_action(
-    name=None, serializer=None, response_serializer=None, permissions=None
+    name=None, serializer=None, response_serializer=None, permissions=None, display=None
 ):
     """
     Decorator that makes a workflow step callable as a StateZero action.
@@ -27,7 +27,11 @@ def statezero_action(
     The workflow is expected to be in a SUSPENDED state before this action can be called.
 
     Usage:
-    @statezero_action(name="expense_submit_review", serializer=ReviewInputSerializer)
+    @statezero_action(
+        name="expense_submit_review",
+        serializer=ReviewInputSerializer,
+        display=DisplayMetadata(...)
+    )
     @step()
     def await_review(self, reviewer_notes: str, priority: str):
         # ... step logic ...
@@ -171,6 +175,7 @@ def statezero_action(
                 serializer=final_serializer,
                 response_serializer=final_response_serializer,
                 permissions=permissions or [],
+                display=display,
             )(action_function)
         except Exception as e:
             logger.exception(f"Error decorating action {step_func.__name__}: {str(e)}")

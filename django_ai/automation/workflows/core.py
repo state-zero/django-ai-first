@@ -15,7 +15,6 @@ from django.db.models import Q
 from .models import WorkflowRun, WorkflowStatus, StepExecution
 from django.utils import timezone
 from ...utils.json import safe_model_dump
-from .metadata import StepDisplayMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -286,23 +285,20 @@ def event_workflow(
 
 
 def step(
-    retry: Optional[Retry] = None, 
-    start: bool = False,
-    display: Optional[StepDisplayMetadata] = None
+    retry: Optional[Retry] = None,
+    start: bool = False
 ):
     """
     Decorator for workflow steps
-    
+
     Args:
         retry: Retry policy for this step
         start: Whether this is the starting step
-        display: Frontend display metadata (titles, descriptions, field groupings)
     """
     def decorator(func):
         func._is_workflow_step = True
         func._is_start_step = start
         func._step_retry = retry
-        func._display_metadata = display
         return func
 
     return decorator
