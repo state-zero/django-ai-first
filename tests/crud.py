@@ -9,8 +9,7 @@ from statezero.core.config import ModelConfig
 
 from django_ai.conversations.models import (
     ConversationSession,
-    ConversationMessage,
-    File,
+    ConversationMessage
 )
 from django_ai.conversations.hooks import (
     set_message_type,
@@ -47,14 +46,6 @@ registry.register(
         model=ConversationMessage,
         pre_hooks=[set_message_type, set_processing_status],
         post_hooks=[],
-        permissions=[AllowAllPermission]
-    ),
-)
-
-registry.register(
-    File,
-    ModelConfig(
-        model=File,
         permissions=[AllowAllPermission]
     ),
 )

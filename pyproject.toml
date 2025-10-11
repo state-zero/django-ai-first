@@ -51,6 +51,7 @@ include = ["django_ai*"]
 "django_ai.automation.queues" = ["migrations/*.py"]
 "django_ai.automation.agents" = ["migrations/*.py"]
 "django_ai.conversations" = ["migrations/*.py"]
+"django_ai.files" = ["migrations/*.py"]
 "*" = ["*.html", "*.css", "*.js", "*.txt"]
 
 [tool.pytest.ini_options]

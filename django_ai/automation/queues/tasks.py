@@ -3,6 +3,7 @@ from django.utils import timezone
 from ..workflows.core import engine
 from ..events.services import event_processor
 from ...conversations.tasks import process_conversation_message
+from ...files.tasks import process_file_ocr
 
 def execute_step(run_id: int, step_name: str) -> None:
     engine.execute_step(run_id, step_name)

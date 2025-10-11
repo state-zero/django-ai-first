@@ -157,12 +157,4 @@ class ResponseStream:
         return self.content
 
 
-def get_file_text(file_id):
-    """Utility function to get text from a file"""
-    try:
-        from .models import File
-
-        file = File.objects.get(id=file_id)
-        return file.extract_text()
-    except:
-        return ""
+# get_file_text removed - use django_ai.files.tools.get_file_content instead

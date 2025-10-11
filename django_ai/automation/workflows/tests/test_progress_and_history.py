@@ -164,16 +164,16 @@ class TestProgressHistoryAndStepType(TestCase):
                 return complete()
 
         run = engine.start("step_type_test")
-        
+
         # Initial step is automated
         self.assertEqual(run.current_step, "automated_step")
-        self.assertEqual(run.current_step_type, StepType.AUTOMATED)
+        self.assertEqual(run.current_step_display['step_type'], StepType.AUTOMATED)
 
         # Move to action step
         engine.execute_step(run.id, "automated_step")
         run.refresh_from_db()
         self.assertEqual(run.current_step, "action_step")
-        self.assertEqual(run.current_step_type, StepType.ACTION)
+        self.assertEqual(run.current_step_display['step_type'], StepType.ACTION)
         self.assertEqual(run.status, WorkflowStatus.SUSPENDED)
 
         # Simulate action completion
@@ -191,4 +191,4 @@ class TestProgressHistoryAndStepType(TestCase):
 
         run.refresh_from_db()
         self.assertEqual(run.current_step, "automated_step_2")
-        self.assertEqual(run.current_step_type, StepType.AUTOMATED)
+        self.assertEqual(run.current_step_display['step_type'], StepType.AUTOMATED)

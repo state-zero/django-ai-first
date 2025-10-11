@@ -70,13 +70,18 @@ class MessagingFlowHappyPathTest(APITransactionTestCase):
 
     def wait_for_processing(self, message_id, timeout=5):
         """Wait for a message to be processed"""
+        from django.db import connection
+
+        # Force transaction commit to trigger on_commit hooks
+        connection.commit()
+
         start = time.time()
         while time.time() - start < timeout:
             message = ConversationMessage.objects.get(id=message_id)
             if message.processing_status == "completed":
                 return message
             time.sleep(0.1)  # Poll every 100ms
-        
+
         # Timeout - raise assertion error
         message = ConversationMessage.objects.get(id=message_id)
         self.fail(f"Message processing timed out. Status: {message.processing_status}")

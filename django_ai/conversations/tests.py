@@ -12,7 +12,6 @@ from pydantic import BaseModel
 from django_ai.conversations.models import (
     ConversationSession,
     ConversationMessage,
-    File,
 )
 from django_ai.conversations.base import ConversationAgent
 from django_ai.conversations.registry import register_agent
@@ -20,7 +19,6 @@ from django_ai.conversations.decorators import with_context
 from django_ai.conversations.context import (
     ResponseStream,
     display_widget,
-    get_file_text
 )
 from django_ai.automation.workflows.core import engine
 from django_ai.automation.queues.sync_executor import SynchronousExecutor
@@ -171,16 +169,9 @@ class FullFeatureTestAgent(ConversationAgent):
 
     def _process_files(self, files):
         """Process uploaded files - now receives files as parameter"""
-        results = []
-        for file_obj in files:
-            text = get_file_text(file_obj.id)
-            if text:
-                results.append(
-                    f"✅ {file_obj.filename}: {len(text)} characters extracted"
-                )
-            else:
-                results.append(f"❌ {file_obj.filename}: Could not extract text")
-        return "File Processing Results:\n" + "\n".join(results)
+        # File handling moved to django_ai.files module
+        # Use django_ai.files.tools.get_file_content for new file handling
+        return "File processing moved to django_ai.files module"
 
 
 class FullConversationFlowTest(APITestCase):
