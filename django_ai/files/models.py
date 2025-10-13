@@ -45,7 +45,7 @@ class ManagedFile(models.Model):
         Folder,
         null=True,
         blank=True,
-        on_delete=models.SET_NULL,
+        on_delete=models.CASCADE,
         related_name='files'
     )
 

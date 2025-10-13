@@ -64,6 +64,7 @@ class ConversationMessage(models.Model):
     component_type = models.CharField(max_length=100, blank=True)
     component_data = models.JSONField(default=dict)
     files = models.ManyToManyField("files.ManagedFile", blank=True, related_name="conversation_messages")
+    tables = models.ManyToManyField("tables.Table", blank=True, related_name="conversation_messages")
 
     # Processing state for optimistic updates
     PROCESSING_STATUS = [

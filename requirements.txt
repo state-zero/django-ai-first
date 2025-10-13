@@ -7,3 +7,7 @@ tika==2.6.0
 pusher==3.3.2
 statezero
 django-cors-headers==4.7.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+e2b-code-interpreter>=1.0.0
+django-simple-history>=3.0.0

@@ -11,6 +11,8 @@ from django_ai.conversations.models import (
     ConversationSession,
     ConversationMessage
 )
+from django_ai.tables.models import Table, Workspace
+
 from django_ai.conversations.hooks import (
     set_message_type,
     set_processing_status,
@@ -68,6 +70,24 @@ registry.register(
     ManagedFile,
     ModelConfig(
         model=ManagedFile,
+        permissions=[AllowAllPermission]
+    ),
+)
+
+# Register Workspace with StateZero
+registry.register(
+    Workspace,
+    ModelConfig(
+        model=Workspace,
+        permissions=[AllowAllPermission]
+    ),
+)
+
+# Register Table with StateZero
+registry.register(
+    Table,
+    ModelConfig(
+        model=Table,
         permissions=[AllowAllPermission]
     ),
 )
