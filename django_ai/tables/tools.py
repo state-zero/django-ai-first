@@ -3,6 +3,7 @@ Tool functions for LLM agents to interact with tables and workspaces.
 """
 
 from typing import Optional
+from django_ai.tools import register_tool
 from .models import Table, Workspace
 
 
@@ -40,6 +41,17 @@ def _validate_table_or_workspace(table: Optional[Table], workspace: Optional[Wor
         )
 
 
+@register_tool(
+    icon="table",
+    category="data",
+    use_cases=[
+        "view table structure",
+        "see table schema",
+        "preview table data",
+        "get table information",
+        "check table columns"
+    ]
+)
 def get_metadata(
     table: Optional[Table] = None,
     workspace: Optional[Workspace] = None,
@@ -71,6 +83,18 @@ def get_metadata(
         return workspace.get_metadata(head=head, tail=tail, include_history=include_history)
 
 
+@register_tool(
+    icon="code",
+    category="data",
+    use_cases=[
+        "run python code",
+        "query table data",
+        "filter rows",
+        "transform data",
+        "analyze table",
+        "compute statistics"
+    ]
+)
 def execute_code(
     code: str,
     table: Optional[Table] = None,
@@ -121,6 +145,16 @@ def execute_code(
         raise ExecutionError(f"Unexpected error during code execution: {str(e)}")
 
 
+@register_tool(
+    icon="history",
+    category="data",
+    use_cases=[
+        "undo table changes",
+        "revert table",
+        "restore previous version",
+        "rollback changes"
+    ]
+)
 def revert_version(table: Table, history_id: Optional[int] = None) -> dict:
     """
     Revert a table to a previous version.

@@ -109,17 +109,53 @@ class ConversationMessage(models.Model):
 class ConversationWidget(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     session = models.ForeignKey(
-        ConversationSession, 
-        on_delete=models.CASCADE, 
+        ConversationSession,
+        on_delete=models.CASCADE,
         related_name="widgets"
     )
-    
+
     widget_type = models.CharField(max_length=100)
     widget_data = models.JSONField()
-    
+
     timestamp = models.DateTimeField(auto_now_add=True)
-    
+
     class Meta:
         ordering = ['timestamp']
 
-# File model removed - use django_ai.files.models.ManagedFile instead
+
+class SessionToolLoadout(models.Model):
+    """
+    Simple mapping between ConversationSession and ToolLoadout.
+
+    Links a conversation session to its tool configuration.
+    """
+    session = models.OneToOneField(
+        ConversationSession,
+        on_delete=models.CASCADE,
+        related_name="tool_loadout",
+        help_text="The conversation session"
+    )
+
+    loadout = models.ForeignKey(
+        'tools.ToolLoadout',
+        on_delete=models.CASCADE,
+        help_text="The tool loadout configuration"
+    )
+
+    class Meta:
+        verbose_name = "Session Tool Loadout"
+        verbose_name_plural = "Session Tool Loadouts"
+
+    def __str__(self):
+        return f"Session {self.session.id} -> Loadout {self.loadout.id}"
+
+    def clean(self):
+        """Validate the loadout is valid for this session's agent"""
+        from django_ai.conversations.registry import registry
+
+        try:
+            agent_class = registry.get(self.session.agent_path)
+            self.loadout.validate_for_agent(agent_class)
+        except Exception as e:
+            from django.core.exceptions import ValidationError
+            raise ValidationError(str(e))

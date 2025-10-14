@@ -3,9 +3,20 @@ Agent tools for working with managed files.
 These functions can be used by AI agents to interact with file content.
 """
 from typing import Optional
+from django_ai.tools import register_tool
 from .models import ManagedFile
 
 
+@register_tool(
+    icon="file",
+    category="files",
+    use_cases=[
+        "read file content",
+        "extract text from document",
+        "view OCR results",
+        "get document text"
+    ]
+)
 def get_file_content(
     file_id: int,
     start: Optional[int] = None,

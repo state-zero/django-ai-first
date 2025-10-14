@@ -38,10 +38,10 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    
+
     "rest_framework",
     "statezero.adaptors.django",
-    
+
     "django_ai.automation.events",
     "django_ai.automation.queues",
     "django_ai.automation.workflows",
@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     "django_ai.conversations",
     "django_ai.files",
     "django_ai.tables",
+    "django_ai.tools",
     "tests",
 ]
 
