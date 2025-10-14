@@ -1,8 +1,8 @@
 Django==5.1.7
-pydantic==2.11.7
+pydantic
 cytoolz==1.0.1
 django-q2==1.8.0
-requests==2.31.0
+requests
 tika==2.6.0
 pusher==3.3.2
 statezero
