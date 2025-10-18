@@ -97,10 +97,51 @@ def display_widget(widget_type, data):
     # Send websocket event for real-time display
     conv_context = ConversationContext(str(session.id), request)
     conv_context._send_event("widget", {
-        "widget_type": widget_type, 
+        "widget_type": widget_type,
         "data": data,
         "widget_id": str(widget.id)  # Include ID for tracking
     })
+
+    return widget
+
+
+def update_widget(widget_id, data=None, display_data=None):
+    """Update an existing widget's data and/or display state"""
+    session = _current_session.get()
+    request = _current_request.get()
+
+    if not session:
+        raise RuntimeError(
+            "update_widget() must be called within conversation context"
+        )
+
+    try:
+        widget = ConversationWidget.objects.get(id=widget_id, session=session)
+    except ConversationWidget.DoesNotExist:
+        raise ValueError(f"Widget {widget_id} not found in current session")
+
+    # Update fields if provided
+    updated = False
+    if data is not None:
+        widget.widget_data = data
+        updated = True
+    if display_data is not None:
+        widget.display_data = display_data
+        updated = True
+
+    if updated:
+        widget.save()
+
+        # Send websocket event for real-time update
+        conv_context = ConversationContext(str(session.id), request)
+        conv_context._send_event("widget_update", {
+            "widget_id": str(widget.id),
+            "widget_type": widget.widget_type,
+            "data": widget.widget_data if data is not None else None,
+            "display_data": widget.display_data if display_data is not None else None,
+        })
+
+    return widget
 
 
 class ResponseStream:

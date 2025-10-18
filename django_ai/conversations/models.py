@@ -116,12 +116,15 @@ class ConversationWidget(models.Model):
 
     widget_type = models.CharField(max_length=100)
     widget_data = models.JSONField()
+    display_data = models.JSONField(
+        default=dict,
+        help_text="UI state: position, size, minimized, closed"
+    )
 
     timestamp = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['timestamp']
-
 
 class SessionToolLoadout(models.Model):
     """
