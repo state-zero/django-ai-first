@@ -77,7 +77,7 @@ def _auto_save_context():
 
 
 # Utility functions
-def display_widget(widget_type, data):
+def display_widget(widget_type, data, display_data=None):
     """Display a widget in the current conversation"""
     session = _current_session.get()
     request = _current_request.get()
@@ -91,7 +91,8 @@ def display_widget(widget_type, data):
     widget = ConversationWidget.objects.create(
         session=session,
         widget_type=widget_type,
-        widget_data=data
+        widget_data=data,
+        display_data=display_data
     )
     widget.refresh_from_db()
 
@@ -100,6 +101,7 @@ def display_widget(widget_type, data):
     conv_context._send_event("widget", {
         "widget_type": widget_type,
         "data": data,
+        "display_data": display_data,
         "widget_id": str(widget.id),  # Include ID for tracking
         "timestamp": widget.timestamp.isoformat(),
         "updated_at": widget.updated_at.isoformat(),
