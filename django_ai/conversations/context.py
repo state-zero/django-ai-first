@@ -93,13 +93,16 @@ def display_widget(widget_type, data):
         widget_type=widget_type,
         widget_data=data
     )
+    widget.refresh_from_db()
 
     # Send websocket event for real-time display
     conv_context = ConversationContext(str(session.id), request)
     conv_context._send_event("widget", {
         "widget_type": widget_type,
         "data": data,
-        "widget_id": str(widget.id)  # Include ID for tracking
+        "widget_id": str(widget.id),  # Include ID for tracking
+        "timestamp": widget.timestamp.isoformat(),
+        "updated_at": widget.updated_at.isoformat(),
     })
 
     return widget
@@ -131,6 +134,7 @@ def update_widget(widget_id, data=None, display_data=None):
 
     if updated:
         widget.save()
+        widget.refresh_from_db()
 
         # Send websocket event for real-time update
         conv_context = ConversationContext(str(session.id), request)
@@ -139,6 +143,8 @@ def update_widget(widget_id, data=None, display_data=None):
             "widget_type": widget.widget_type,
             "data": widget.widget_data if data is not None else None,
             "display_data": widget.display_data if display_data is not None else None,
+            "timestamp": widget.timestamp.isoformat(),
+            "updated_at": widget.updated_at.isoformat(),
         })
 
     return widget
