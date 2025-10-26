@@ -48,6 +48,22 @@ class Fail(StepResult):
     reason: str
 
 
+@dataclass
+class RunSubflow(StepResult):
+    workflow_class: type
+    on_complete: str
+    context_kwargs: Dict[str, Any]
+
+
+@dataclass
+class SubflowResult:
+    """Result of a completed subworkflow, passed to the on_complete step."""
+    status: WorkflowStatus  # COMPLETED or FAILED
+    context: BaseModel  # The child workflow's final context
+    run_id: int  # The child workflow run ID
+    error: Optional[str] = None  # Error message if failed
+
+
 # Helper functions
 def goto(step: str, progress: Optional[float] = None) -> Goto:
     return Goto(step, progress)
@@ -103,6 +119,44 @@ def complete(display_title: Optional[str] = None, display_subtitle: Optional[str
 
 def fail(reason: str) -> Fail:
     return Fail(reason)
+
+
+def run_subflow(workflow_class: type, on_complete: Callable, **context_kwargs) -> RunSubflow:
+    """
+    Run a subworkflow and resume at on_complete when it finishes.
+
+    Args:
+        workflow_class: The workflow class to run as a subworkflow
+        on_complete: The step method to go to when subworkflow completes/fails
+        **context_kwargs: Arguments to pass to subworkflow's create_context
+
+    Example:
+        @step()
+        def my_step(self):
+            ctx = get_context()
+            return run_subflow(
+                SubWorkflow,
+                on_complete=self.handle_result,
+                input_data=ctx.some_value
+            )
+
+        @step()
+        def handle_result(self, subflow_result: SubflowResult):
+            ctx = get_context()
+            # Access the child workflow's result
+            if subflow_result.status == WorkflowStatus.COMPLETED:
+                ctx.output = subflow_result.context.output_value
+            else:
+                # Handle failure
+                ctx.error = subflow_result.error
+            return complete()
+    """
+    on_complete_name = on_complete.__name__ if callable(on_complete) else str(on_complete)
+    return RunSubflow(
+        workflow_class=workflow_class,
+        on_complete=on_complete_name,
+        context_kwargs=context_kwargs
+    )
 
 
 # Retry strategy
@@ -485,7 +539,25 @@ class WorkflowEngine:
                 if not getattr(step_method, "_is_workflow_step", False):
                     raise ValueError(f"Method {step_name} is not a workflow step")
 
-                result = step_method()
+                # Check if step accepts subflow_result parameter
+                import inspect
+                sig = inspect.signature(step_method)
+                step_kwargs = {}
+
+                if 'subflow_result' in sig.parameters and run.active_subworkflow_run_id:
+                    # Load the child workflow result
+                    child_run = WorkflowRun.objects.get(id=run.active_subworkflow_run_id)
+                    child_workflow_cls = _workflows[child_run.name]
+                    child_context = child_workflow_cls.Context.model_validate(child_run.data)
+
+                    step_kwargs['subflow_result'] = SubflowResult(
+                        status=child_run.status,
+                        context=child_context,
+                        run_id=child_run.id,
+                        error=child_run.error
+                    )
+
+                result = step_method(**step_kwargs)
 
                 if not isinstance(result, StepResult):
                     raise ValueError(
@@ -565,6 +637,53 @@ class WorkflowEngine:
                 run.save()
                 self._queue_step(run.id, step_name)
 
+        elif isinstance(result, RunSubflow):
+            # Mark current step as completed
+            StepExecution.objects.create(
+                workflow_run=run,
+                step_name=run.current_step,
+                status='completed'
+            )
+
+            # Validate the subworkflow class
+            if not hasattr(result.workflow_class, '_workflow_name'):
+                raise ValueError(f"{result.workflow_class.__name__} is not a registered @workflow")
+
+            # Validate the on_complete step exists
+            target = getattr(workflow_cls, result.on_complete, None)
+            if not callable(target) or not getattr(target, "_is_workflow_step", False):
+                raise ValueError(f"on_complete step {result.on_complete} is not a @step")
+
+            # Create the child workflow
+            child_context = result.workflow_class.create_context(**result.context_kwargs)
+            child_data = safe_model_dump(child_context)
+
+            child_run = WorkflowRun.objects.create(
+                name=result.workflow_class._workflow_name,
+                version=result.workflow_class._workflow_version,
+                current_step=result.workflow_class._start_step,
+                data=child_data,
+                status=WorkflowStatus.RUNNING,
+                parent_run_id=run.id,
+            )
+
+            # Update parent context to store child run ID
+            parent_context = workflow_cls.Context.model_validate(run.data)
+            if hasattr(parent_context, 'active_subworkflow_run_id'):
+                parent_context.active_subworkflow_run_id = child_run.id
+                run.data = safe_model_dump(parent_context)
+
+            # Update parent to track the child and suspend waiting for signal
+            signal_name = f"subflow:{child_run.id}:complete"
+            run.active_subworkflow_run_id = child_run.id
+            run.current_step = result.on_complete
+            run.status = WorkflowStatus.SUSPENDED
+            run.waiting_signal = signal_name
+            run.save()
+
+            # Start the child workflow
+            self._queue_step(child_run.id, child_run.current_step)
+
         elif isinstance(result, Sleep):
             run.status = WorkflowStatus.WAITING
             run.wake_at = timezone.now() + result.duration
@@ -597,6 +716,11 @@ class WorkflowEngine:
 
             run.save()
 
+            # If this is a subworkflow, signal the parent
+            if run.parent_run_id:
+                signal_name = f"subflow:{run.id}:complete"
+                self.signal(signal_name)
+
         elif isinstance(result, Fail):
             StepExecution.objects.create(
                 workflow_run=run,
@@ -608,6 +732,11 @@ class WorkflowEngine:
             run.status = WorkflowStatus.FAILED
             run.error = result.reason
             run.save()
+
+            # If this is a subworkflow, signal the parent
+            if run.parent_run_id:
+                signal_name = f"subflow:{run.id}:complete"
+                self.signal(signal_name)
 
     def signal(self, signal_name: str, payload: Optional[Dict[str, Any]] = None):
         """Send signal to waiting workflows"""

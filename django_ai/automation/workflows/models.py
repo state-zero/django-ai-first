@@ -25,6 +25,10 @@ class WorkflowRun(models.Model):
 
     triggered_by_event_id = models.IntegerField(null=True, blank=True)
 
+    # Subworkflow tracking
+    parent_run_id = models.IntegerField(null=True, blank=True, help_text="Parent workflow if this is a subworkflow")
+    active_subworkflow_run_id = models.IntegerField(null=True, blank=True, help_text="Currently active child subworkflow")
+
     # Timing
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -121,6 +125,7 @@ class WorkflowRun(models.Model):
             models.Index(fields=["status", "waiting_signal"]),
             models.Index(fields=["status", "wake_at"]),
             models.Index(fields=["triggered_by_event_id"]),
+            models.Index(fields=["parent_run_id"]),
         ]
 
 class StepExecution(models.Model):

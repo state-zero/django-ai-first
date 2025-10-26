@@ -726,6 +726,253 @@ class ExpenseApprovalWorkflow:
 
 ---
 
+## Subworkflows (Workflow Composition)
+
+Workflows can launch other workflows as subworkflows, enabling reusable workflow components and complex multi-level orchestration.
+
+### Basic Subworkflow Example
+
+```python
+from django_ai.automation.workflows.core import run_subflow, SubflowResult
+
+# Reusable subworkflow
+@workflow("send_notification")
+class SendNotificationWorkflow:
+    class Context(BaseModel):
+        recipient_email: str
+        message: str
+        sent: bool = False
+
+    @step(start=True)
+    def send_email(self):
+        ctx = get_context()
+        # Email sending logic
+        ctx.sent = True
+        return complete()
+
+# Parent workflow that uses the subworkflow
+@workflow("user_registration")
+class UserRegistrationWorkflow:
+    class Context(BaseModel):
+        user_email: str
+        user_id: int = 0
+        active_subworkflow_run_id: Optional[int] = None
+
+    @step(start=True)
+    def create_user(self):
+        ctx = get_context()
+        # User creation logic
+        ctx.user_id = 123
+
+        # Launch subworkflow
+        return run_subflow(
+            SendNotificationWorkflow,
+            on_complete=self.after_notification,
+            recipient_email=ctx.user_email,
+            message="Welcome to our platform!"
+        )
+
+    @step()
+    def after_notification(self, subflow_result: SubflowResult):
+        ctx = get_context()
+
+        # Access the subworkflow's result
+        if subflow_result.status == WorkflowStatus.COMPLETED:
+            notification_ctx = subflow_result.context
+            print(f"Email sent: {notification_ctx.sent}")
+            return complete()
+        else:
+            # Handle failure
+            return fail(f"Notification failed: {subflow_result.error}")
+```
+
+### How Subworkflows Work
+
+1. **Launch**: `run_subflow()` creates a new workflow run as a child
+2. **Suspend**: Parent workflow suspends and waits for child to complete
+3. **Execute**: Child workflow runs independently
+4. **Signal**: When child completes/fails, it signals the parent
+5. **Resume**: Parent resumes at the `on_complete` step with results
+
+### SubflowResult Parameter
+
+The `on_complete` step receives a `SubflowResult` object with:
+
+```python
+@step()
+def handle_subflow(self, subflow_result: SubflowResult):
+    # Check completion status
+    if subflow_result.status == WorkflowStatus.COMPLETED:
+        # Access child workflow's context (fully typed)
+        child_data = subflow_result.context
+        print(f"Child output: {child_data.some_field}")
+
+    elif subflow_result.status == WorkflowStatus.FAILED:
+        # Handle failure
+        print(f"Child failed: {subflow_result.error}")
+
+    # Access child run ID if needed
+    child_run_id = subflow_result.run_id
+
+    return complete()
+```
+
+**SubflowResult fields:**
+- `status`: `WorkflowStatus.COMPLETED` or `WorkflowStatus.FAILED`
+- `context`: The child workflow's final context (typed as child's Context model)
+- `run_id`: The child workflow run ID
+- `error`: Error message if the child failed (None otherwise)
+
+### Nested Subworkflows
+
+Subworkflows can launch their own subworkflows, creating multi-level hierarchies:
+
+```python
+@workflow("payment_processing")
+class PaymentWorkflow:
+    class Context(BaseModel):
+        amount: Decimal
+        processed: bool = False
+
+    @step(start=True)
+    def process(self):
+        ctx = get_context()
+        ctx.processed = True
+        return complete()
+
+@workflow("order_fulfillment")
+class FulfillmentWorkflow:
+    class Context(BaseModel):
+        order_id: int
+        payment_complete: bool = False
+        active_subworkflow_run_id: Optional[int] = None
+
+    @step(start=True)
+    def start_payment(self):
+        ctx = get_context()
+        return run_subflow(
+            PaymentWorkflow,
+            on_complete=self.after_payment,
+            amount=Decimal("99.99")
+        )
+
+    @step()
+    def after_payment(self, subflow_result: SubflowResult):
+        ctx = get_context()
+        ctx.payment_complete = subflow_result.context.processed
+        return complete()
+
+@workflow("order_management")
+class OrderWorkflow:
+    class Context(BaseModel):
+        customer_id: int
+        order_complete: bool = False
+        active_subworkflow_run_id: Optional[int] = None
+
+    @step(start=True)
+    def start_fulfillment(self):
+        return run_subflow(
+            FulfillmentWorkflow,
+            on_complete=self.finalize,
+            order_id=456
+        )
+
+    @step()
+    def finalize(self, subflow_result: SubflowResult):
+        ctx = get_context()
+        ctx.order_complete = subflow_result.context.payment_complete
+        return complete()
+```
+
+### Tracking Active Subworkflows
+
+The parent context can optionally track the active subworkflow:
+
+```python
+class Context(BaseModel):
+    active_subworkflow_run_id: Optional[int] = None
+```
+
+This field is automatically set when a subworkflow is launched and can be used to query the child workflow from the database if needed (though `SubflowResult` provides the most common data).
+
+### Subworkflow Best Practices
+
+**When to use subworkflows:**
+- ✅ Reusable workflow components (notifications, payments, verifications)
+- ✅ Breaking complex workflows into manageable pieces
+- ✅ Workflows that need to be triggered independently or as part of larger flows
+- ✅ Multi-tenant scenarios where different tenants use different sub-processes
+
+**Design tips:**
+- Keep subworkflows focused and single-purpose
+- Use typed Context models so parent workflows get type safety
+- Handle both success and failure cases in `on_complete` steps
+- Consider making subworkflows event-triggered so they can run standalone too
+
+**Example: Reusable verification subworkflow:**
+```python
+@workflow("email_verification")
+class EmailVerificationWorkflow:
+    """Reusable email verification - can be used by multiple parent workflows"""
+
+    class Context(BaseModel):
+        email: str
+        verification_code: str = ""
+        verified: bool = False
+
+    @step(start=True)
+    def send_code(self):
+        ctx = get_context()
+        ctx.verification_code = generate_code()
+        send_email(ctx.email, ctx.verification_code)
+        return goto(self.wait_for_verification)
+
+    @wait_for_event("email_verified", timeout=timedelta(hours=24))
+    @step()
+    def wait_for_verification(self):
+        ctx = get_context()
+        ctx.verified = True
+        return complete()
+
+# Used by user registration
+@workflow("user_registration")
+class UserRegistrationWorkflow:
+    @step()
+    def verify_email(self):
+        ctx = get_context()
+        return run_subflow(
+            EmailVerificationWorkflow,
+            on_complete=self.after_verification,
+            email=ctx.email
+        )
+
+    @step()
+    def after_verification(self, subflow_result: SubflowResult):
+        if not subflow_result.context.verified:
+            return fail("Email verification failed")
+        return complete()
+
+# Also used by password reset
+@workflow("password_reset")
+class PasswordResetWorkflow:
+    @step()
+    def verify_email(self):
+        ctx = get_context()
+        return run_subflow(
+            EmailVerificationWorkflow,
+            on_complete=self.after_verification,
+            email=ctx.email
+        )
+
+    @step()
+    def after_verification(self, subflow_result: SubflowResult):
+        if subflow_result.context.verified:
+            return goto(self.reset_password)
+        return fail("Verification failed")
+```
+
+---
+
 ## Summary: Complete Display Metadata Example
 
 ```python
