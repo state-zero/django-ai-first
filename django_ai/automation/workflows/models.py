@@ -113,6 +113,9 @@ class WorkflowRun(models.Model):
         # Determine step type
         if hasattr(step_method, "_has_statezero_action"):
             result['step_type'] = StepType.ACTION
+            # Include both the simple action name and full path for the frontend
+            result['action_name'] = step_method.__name__
+            result['action_path'] = getattr(step_method, '_full_action_name', None)
         elif hasattr(step_method, "_is_event_wait_step"):
             result['step_type'] = StepType.WAITING
         else:

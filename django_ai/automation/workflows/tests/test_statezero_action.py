@@ -83,8 +83,10 @@ class AsActionStateZeroTest(TestCase):
         self.assertEqual(run.status, WorkflowStatus.SUSPENDED.value)
 
         # 3. Call the StateZero action endpoint
+        # Get the full action path from the workflow step function
+        full_action_name = ExpenseApprovalWorkflow.await_review._full_action_name
         action_url = reverse(
-            "statezero:action", kwargs={"action_name": "expense_submit_review"}
+            "statezero:action", kwargs={"action_name": full_action_name}
         )
         response = self.client.post(
             action_url,
@@ -148,7 +150,7 @@ class AsActionStateZeroTest(TestCase):
 
         # Test invalid input via StateZero endpoint
         action_url = reverse(
-            "statezero:action", kwargs={"action_name": "expense_set_details"}
+            "statezero:action", kwargs={"action_name": ValidationWorkflow.set_details._full_action_name}
         )
         response = self.client.post(
             action_url,
@@ -182,7 +184,7 @@ class AsActionStateZeroTest(TestCase):
                 return complete()
 
         action_url = reverse(
-            "statezero:action", kwargs={"action_name": "test_nonexistent_action"}
+            "statezero:action", kwargs={"action_name": "workflow_NonexistentTestWorkflow_test_nonexistent_action"}
         )
         response = self.client.post(
             action_url,
@@ -218,7 +220,7 @@ class AsActionStateZeroTest(TestCase):
 
         run = engine.start("user_workflow")
         action_url = reverse(
-            "statezero:action", kwargs={"action_name": "user_action_step"}
+            "statezero:action", kwargs={"action_name": UserWorkflow.process_user_action._full_action_name}
         )
         response = self.client.post(
             action_url,
@@ -251,7 +253,7 @@ class AsActionStateZeroTest(TestCase):
 
         run = engine.start("no_serializer_workflow")
         action_url = reverse(
-            "statezero:action", kwargs={"action_name": "simple_action"}
+            "statezero:action", kwargs={"action_name": NoSerializerWorkflow.simple_step._full_action_name}
         )
         response = self.client.post(
             action_url,
@@ -338,7 +340,7 @@ class AsActionStateZeroTest(TestCase):
 
         # Step 1: Submit expense
         submit_url = reverse(
-            "statezero:action", kwargs={"action_name": "submit_expense"}
+            "statezero:action", kwargs={"action_name": ExpenseApprovalProcess.submit_expense._full_action_name}
         )
         self.client.post(
             submit_url,
@@ -357,7 +359,7 @@ class AsActionStateZeroTest(TestCase):
 
         # Step 2: Manager approval
         review_url = reverse(
-            "statezero:action", kwargs={"action_name": "manager_review"}
+            "statezero:action", kwargs={"action_name": ExpenseApprovalProcess.await_manager_review._full_action_name}
         )
         self.client.post(
             review_url,
@@ -375,7 +377,7 @@ class AsActionStateZeroTest(TestCase):
 
         # Step 3: Finance processing
         finance_url = reverse(
-            "statezero:action", kwargs={"action_name": "finance_process"}
+            "statezero:action", kwargs={"action_name": ExpenseApprovalProcess.await_finance_processing._full_action_name}
         )
         self.client.post(
             finance_url,
@@ -446,7 +448,7 @@ class AsActionStateZeroTest(TestCase):
 
         # Step 1: Submit expense
         submit_url = reverse(
-            "statezero:action", kwargs={"action_name": "submit_expense_2"}
+            "statezero:action", kwargs={"action_name": ExpenseRejectionProcess.submit_expense._full_action_name}
         )
         self.client.post(
             submit_url,
@@ -464,7 +466,7 @@ class AsActionStateZeroTest(TestCase):
 
         # Step 2: Manager rejection
         review_url = reverse(
-            "statezero:action", kwargs={"action_name": "manager_review_2"}
+            "statezero:action", kwargs={"action_name": ExpenseRejectionProcess.await_manager_review._full_action_name}
         )
         self.client.post(
             review_url,

@@ -163,15 +163,23 @@ def statezero_action(
             finally:
                 _current_context.reset(token)
 
+        # Extract workflow class name from the method's qualified name
+        # e.g., "ExpenseWorkflow.await_review" -> "ExpenseWorkflow"
+        class_name = step_func.__qualname__.rsplit('.', 1)[0] if '.' in step_func.__qualname__ else ''
+
+        # Build action name: workflow_{ClassName}_{action_name}
+        action_name = name or step_func.__name__
+        full_action_name = f"workflow_{class_name}_{action_name}" if class_name else f"workflow_{action_name}"
+
         # Set the signature and metadata for the action function
         action_function.__signature__ = action_sig
-        action_function.__name__ = name or f"workflow_{step_func.__name__}"
+        action_function.__name__ = full_action_name
         action_function.__doc__ = step_func.__doc__
 
         # Apply the StateZero @action decorator
         try:
             decorated_action = action(
-                name=name or f"workflow_{step_func.__name__}",
+                name=full_action_name,
                 serializer=final_serializer,
                 response_serializer=final_response_serializer,
                 permissions=permissions or [],
@@ -182,6 +190,7 @@ def statezero_action(
             raise
 
         step_func._action_function = decorated_action
+        step_func._full_action_name = full_action_name  # Store for frontend
 
         return step_func
 
