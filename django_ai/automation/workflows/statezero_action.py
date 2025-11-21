@@ -64,11 +64,10 @@ def statezero_action(
             # Check if workflow_run_id is already in the serializer
             serializer_instance = serializer()
             if "workflow_run_id" not in serializer_instance.fields:
-                # Add workflow_run_id field to existing serializer
-                serializer._declared_fields = serializer._declared_fields.copy()
-                serializer._declared_fields["workflow_run_id"] = (
-                    serializers.IntegerField()
-                )
+                # Add workflow_run_id as the FIRST field to match function signature order
+                new_declared_fields = {"workflow_run_id": serializers.IntegerField()}
+                new_declared_fields.update(serializer._declared_fields)
+                serializer._declared_fields = new_declared_fields
             final_serializer = serializer
 
         # Handle response serializer - use provided or create default
