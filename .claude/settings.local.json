@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(python manage.py test:*)",
-      "Bash(python manage.py makemigrations:*)"
+      "Bash(python manage.py makemigrations:*)",
+      "Bash(mkdir:*)"
     ],
     "deny": [],
     "ask": []
