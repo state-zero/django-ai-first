@@ -53,6 +53,7 @@ class RunSubflow(StepResult):
     workflow_class: type
     on_complete: str
     context_kwargs: Dict[str, Any]
+    on_create: Optional[str] = None
 
 
 @dataclass
@@ -121,13 +122,14 @@ def fail(reason: str) -> Fail:
     return Fail(reason)
 
 
-def run_subflow(workflow_class: type, on_complete: Callable, **context_kwargs) -> RunSubflow:
+def run_subflow(workflow_class: type, on_complete: Callable, on_create: Optional[Callable] = None, **context_kwargs) -> RunSubflow:
     """
     Run a subworkflow and resume at on_complete when it finishes.
 
     Args:
         workflow_class: The workflow class to run as a subworkflow
         on_complete: The step method to go to when subworkflow completes/fails
+        on_create: Optional step method to call synchronously when subworkflow is created
         **context_kwargs: Arguments to pass to subworkflow's create_context
 
     Example:
@@ -137,8 +139,14 @@ def run_subflow(workflow_class: type, on_complete: Callable, **context_kwargs) -
             return run_subflow(
                 SubWorkflow,
                 on_complete=self.handle_result,
+                on_create=self.setup_subflow,
                 input_data=ctx.some_value
             )
+
+        @step()
+        def setup_subflow(self, child_run: WorkflowRun):
+            # Called synchronously when subworkflow is created, before it starts
+            pass
 
         @step()
         def handle_result(self, subflow_result: SubflowResult):
@@ -152,10 +160,12 @@ def run_subflow(workflow_class: type, on_complete: Callable, **context_kwargs) -
             return complete()
     """
     on_complete_name = on_complete.__name__ if callable(on_complete) else str(on_complete)
+    on_create_name = on_create.__name__ if callable(on_create) else None if on_create is None else str(on_create)
     return RunSubflow(
         workflow_class=workflow_class,
         on_complete=on_complete_name,
-        context_kwargs=context_kwargs
+        context_kwargs=context_kwargs,
+        on_create=on_create_name
     )
 
 
@@ -654,6 +664,12 @@ class WorkflowEngine:
             if not callable(target) or not getattr(target, "_is_workflow_step", False):
                 raise ValueError(f"on_complete step {result.on_complete} is not a @step")
 
+            # Validate the on_create step exists (if provided)
+            if result.on_create:
+                on_create_target = getattr(workflow_cls, result.on_create, None)
+                if not callable(on_create_target) or not getattr(on_create_target, "_is_workflow_step", False):
+                    raise ValueError(f"on_create step {result.on_create} is not a @step")
+
             # Create the child workflow
             child_context = result.workflow_class.create_context(**result.context_kwargs)
             child_data = safe_model_dump(child_context)
@@ -666,6 +682,32 @@ class WorkflowEngine:
                 status=WorkflowStatus.RUNNING,
                 parent_run_id=run.id,
             )
+
+            # Call on_create callback if provided
+            if result.on_create:
+                # Set up context manager for the parent run so callback can modify context
+                ctx_manager = WorkflowContextManager(run.id, workflow_cls.Context)
+                token = _current_context.set(ctx_manager)
+
+                try:
+                    workflow_instance = workflow_cls()
+                    on_create_method = getattr(workflow_instance, result.on_create)
+
+                    # Check if the callback accepts child_run parameter
+                    import inspect
+                    sig = inspect.signature(on_create_method)
+                    if 'child_run' in sig.parameters:
+                        on_create_method(child_run=child_run)
+                    else:
+                        on_create_method()
+
+                    # Commit context changes made by the callback
+                    ctx_manager.commit_changes()
+                    # Reload run to get updated data
+                    run.refresh_from_db()
+                finally:
+                    # Always reset the context
+                    _current_context.reset(token)
 
             # Update parent context to store child run ID
             parent_context = workflow_cls.Context.model_validate(run.data)

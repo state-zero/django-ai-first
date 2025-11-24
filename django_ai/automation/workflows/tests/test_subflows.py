@@ -261,6 +261,102 @@ class SubflowTestCase(TestCase):
         self.assertEqual(outer_run.status, WorkflowStatus.COMPLETED)
         self.assertEqual(outer_run.data['total'], 84)
 
+    def test_on_create_callback(self):
+        """Test that on_create callback is called when subworkflow is created"""
+
+        # Track callback invocations
+        callback_tracker = []
+
+        @workflow("child_workflow")
+        class ChildWorkflow:
+            class Context(BaseModel):
+                value: int
+                result: int = 0
+
+            @step(start=True)
+            def process(self):
+                ctx = get_context()
+                ctx.result = ctx.value * 3
+                return complete()
+
+        @workflow("parent_workflow")
+        class ParentWorkflow:
+            class Context(BaseModel):
+                input_val: int
+                created_child_id: Optional[int] = None
+                final_result: int = 0
+                active_subworkflow_run_id: Optional[int] = None
+
+            @step(start=True)
+            def start(self):
+                ctx = get_context()
+                return run_subflow(
+                    ChildWorkflow,
+                    on_complete=self.handle_result,
+                    on_create=self.setup_child,
+                    value=ctx.input_val
+                )
+
+            @step()
+            def setup_child(self, child_run: WorkflowRun):
+                """Called synchronously when child is created"""
+                ctx = get_context()
+                ctx.created_child_id = child_run.id
+                callback_tracker.append({
+                    'child_run_id': child_run.id,
+                    'child_status': child_run.status,
+                    'child_name': child_run.name
+                })
+
+            @step()
+            def handle_result(self, subflow_result: SubflowResult):
+                ctx = get_context()
+                ctx.final_result = subflow_result.context.result
+                return complete()
+
+        # Start parent workflow
+        parent_run = engine.start("parent_workflow", input_val=7)
+        self.assertEqual(parent_run.status, WorkflowStatus.RUNNING)
+
+        # Execute the start step which launches the subworkflow
+        engine.execute_step(parent_run.id, "start")
+        parent_run.refresh_from_db()
+
+        # Verify on_create callback was called
+        self.assertEqual(len(callback_tracker), 1)
+        self.assertIsNotNone(callback_tracker[0]['child_run_id'])
+        self.assertEqual(callback_tracker[0]['child_status'], WorkflowStatus.RUNNING)
+        self.assertEqual(callback_tracker[0]['child_name'], "child_workflow")
+
+        # Verify the child_run_id was stored in parent context
+        self.assertEqual(parent_run.data['created_child_id'], callback_tracker[0]['child_run_id'])
+
+        # Verify parent is suspended
+        self.assertEqual(parent_run.status, WorkflowStatus.SUSPENDED)
+        self.assertIsNotNone(parent_run.active_subworkflow_run_id)
+        self.assertEqual(parent_run.current_step, "handle_result")
+
+        # Get the child workflow and verify it matches the callback data
+        child_run = WorkflowRun.objects.get(id=parent_run.active_subworkflow_run_id)
+        self.assertEqual(child_run.id, callback_tracker[0]['child_run_id'])
+        self.assertEqual(child_run.parent_run_id, parent_run.id)
+        self.assertEqual(child_run.data['value'], 7)
+
+        # Execute child workflow
+        engine.execute_step(child_run.id, "process")
+        child_run.refresh_from_db()
+        self.assertEqual(child_run.status, WorkflowStatus.COMPLETED)
+        self.assertEqual(child_run.data['result'], 21)
+
+        # Resume and complete parent workflow
+        parent_run.refresh_from_db()
+        self.assertEqual(parent_run.status, WorkflowStatus.RUNNING)
+
+        engine.execute_step(parent_run.id, "handle_result")
+        parent_run.refresh_from_db()
+        self.assertEqual(parent_run.status, WorkflowStatus.COMPLETED)
+        self.assertEqual(parent_run.data['final_result'], 21)
+
 
 if __name__ == "__main__":
     import unittest
