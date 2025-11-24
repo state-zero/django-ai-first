@@ -192,3 +192,88 @@ class TestProgressHistoryAndStepType(TestCase):
         run.refresh_from_db()
         self.assertEqual(run.current_step, "automated_step_2")
         self.assertEqual(run.current_step_display['step_type'], StepType.AUTOMATED)
+
+    def test_step_execution_captures_step_display(self):
+        """Test that StepExecution records capture step_display metadata including visibility"""
+
+        class TestSerializer(serializers.Serializer):
+            workflow_run_id = serializers.IntegerField()
+
+        @workflow("step_display_capture_test")
+        class StepDisplayWorkflow:
+            class Context(BaseModel):
+                pass
+
+            @step(start=True, title="Visible Step", visible=True)
+            def visible_step(self):
+                return goto(self.hidden_step)
+
+            @step(title="Hidden Step", visible=False)
+            def hidden_step(self):
+                return goto(self.action_step)
+
+            @statezero_action(name="test_display_action", serializer=TestSerializer)
+            @step(title="Action Step")
+            def action_step(self):
+                return goto(self.final_step)
+
+            @step()
+            def final_step(self):
+                return complete()
+
+        run = engine.start("step_display_capture_test")
+
+        # Execute visible_step
+        engine.execute_step(run.id, "visible_step")
+        run.refresh_from_db()
+
+        exec1 = run.step_executions.get(step_name="visible_step")
+        self.assertEqual(exec1.step_display['visible'], True)
+        self.assertEqual(exec1.step_display['step_title'], "Visible Step")
+        self.assertEqual(exec1.step_display['step_type'], StepType.AUTOMATED)
+
+        # Execute hidden_step
+        engine.execute_step(run.id, "hidden_step")
+        run.refresh_from_db()
+
+        exec2 = run.step_executions.get(step_name="hidden_step")
+        self.assertEqual(exec2.step_display['visible'], False)
+        self.assertEqual(exec2.step_display['step_title'], "Hidden Step")
+        self.assertEqual(exec2.step_display['step_type'], StepType.AUTOMATED)
+
+        # Action step is suspended, simulate action completion
+        self.assertEqual(run.status, WorkflowStatus.SUSPENDED)
+        from ..core import _workflows, WorkflowContextManager, _current_context
+        workflow_cls = _workflows["step_display_capture_test"]
+        ctx_manager = WorkflowContextManager(run.id, workflow_cls.Context)
+        token = _current_context.set(ctx_manager)
+        try:
+            workflow_instance = workflow_cls()
+            result = workflow_instance.action_step()
+            ctx_manager.commit_changes()
+            engine._handle_result(run, result)
+        finally:
+            _current_context.reset(token)
+
+        run.refresh_from_db()
+        exec3 = run.step_executions.get(step_name="action_step")
+        self.assertEqual(exec3.step_display['visible'], True)  # Default visibility
+        self.assertEqual(exec3.step_display['step_title'], "Action Step")
+        self.assertEqual(exec3.step_display['step_type'], StepType.ACTION)
+
+        # Execute final_step
+        engine.execute_step(run.id, "final_step")
+        run.refresh_from_db()
+
+        exec4 = run.step_executions.get(step_name="final_step")
+        self.assertEqual(exec4.step_display['visible'], True)  # Default
+        self.assertEqual(exec4.step_display['step_title'], None)  # No title set
+        self.assertEqual(exec4.step_display['step_type'], StepType.AUTOMATED)
+
+        # Verify we can filter by visibility
+        visible_executions = [e for e in run.step_executions.all() if e.step_display.get('visible', True)]
+        hidden_executions = [e for e in run.step_executions.all() if not e.step_display.get('visible', True)]
+
+        self.assertEqual(len(visible_executions), 3)
+        self.assertEqual(len(hidden_executions), 1)
+        self.assertEqual(hidden_executions[0].step_name, "hidden_step")

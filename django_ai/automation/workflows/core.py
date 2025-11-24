@@ -12,11 +12,37 @@ from pydantic import BaseModel
 from contextvars import ContextVar
 from django.db import transaction
 from django.db.models import Q
-from .models import WorkflowRun, WorkflowStatus, StepExecution
+from .models import WorkflowRun, WorkflowStatus, StepExecution, StepType
 from django.utils import timezone
 from ...utils.json import safe_model_dump
 
 logger = logging.getLogger(__name__)
+
+
+def _build_step_display(workflow_cls, step_name: str) -> dict:
+    """Build step display metadata from step method attributes."""
+    step_method = getattr(workflow_cls, step_name, None) if workflow_cls else None
+
+    result = {
+        'visible': True,
+        'step_title': None,
+        'step_type': None,
+    }
+
+    if not step_method:
+        return result
+
+    result['visible'] = getattr(step_method, '_step_visible', True)
+    result['step_title'] = getattr(step_method, '_step_title', None)
+
+    if hasattr(step_method, "_has_statezero_action"):
+        result['step_type'] = StepType.ACTION
+    elif hasattr(step_method, "_is_event_wait_step"):
+        result['step_type'] = StepType.WAITING
+    else:
+        result['step_type'] = StepType.AUTOMATED
+
+    return result
 
 
 # Return types for step functions
@@ -614,7 +640,8 @@ class WorkflowEngine:
             StepExecution.objects.create(
                 workflow_run=run,
                 step_name=run.current_step,
-                status='completed'
+                status='completed',
+                step_display=_build_step_display(workflow_cls, run.current_step)
             )
 
             # Convert method reference to method name
@@ -659,7 +686,8 @@ class WorkflowEngine:
             StepExecution.objects.create(
                 workflow_run=run,
                 step_name=run.current_step,
-                status='completed'
+                status='completed',
+                step_display=_build_step_display(workflow_cls, run.current_step)
             )
 
             # Validate the subworkflow class
@@ -735,7 +763,8 @@ class WorkflowEngine:
             StepExecution.objects.create(
                 workflow_run=run,
                 step_name=run.current_step,
-                status='completed'
+                status='completed',
+                step_display=_build_step_display(workflow_cls, run.current_step)
             )
 
             run.status = WorkflowStatus.COMPLETED
@@ -768,7 +797,8 @@ class WorkflowEngine:
                 workflow_run=run,
                 step_name=run.current_step,
                 status='failed',
-                error=result.reason
+                error=result.reason,
+                step_display=_build_step_display(workflow_cls, run.current_step)
             )
 
             run.status = WorkflowStatus.FAILED
@@ -848,7 +878,8 @@ class WorkflowEngine:
             workflow_run=run,
             step_name=step_name,
             status='failed',
-            error=error_msg
+            error=error_msg,
+            step_display=_build_step_display(workflow_cls, step_name)
         )
 
         run.error = error_msg

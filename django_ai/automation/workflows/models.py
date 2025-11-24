@@ -142,8 +142,8 @@ class WorkflowRun(models.Model):
 class StepExecution(models.Model):
     """Lightweight history of completed/failed workflow steps"""
     workflow_run = models.ForeignKey(
-        WorkflowRun, 
-        on_delete=models.CASCADE, 
+        WorkflowRun,
+        on_delete=models.CASCADE,
         related_name='step_executions'
     )
     step_name = models.CharField(max_length=100)
@@ -155,6 +155,11 @@ class StepExecution(models.Model):
         ]
     )
     error = models.TextField(blank=True)
+    step_display = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Display metadata captured at execution time: {visible, step_title, step_type}"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
