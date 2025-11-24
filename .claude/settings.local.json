@@ -3,7 +3,8 @@
     "allow": [
       "Bash(python manage.py test:*)",
       "Bash(python manage.py makemigrations:*)",
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(python -c:*)"
     ],
     "deny": [],
     "ask": []

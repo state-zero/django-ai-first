@@ -211,7 +211,7 @@ class TestDisplayMetadata(TestCase):
 
         # Verify the display metadata is in statezero's action registry
         from statezero.core.actions import action_registry
-        action_info = action_registry.get_action("collect_property_info")
+        action_info = action_registry.get_action("workflow_StepDisplayWorkflow_collect_property_info")
 
         self.assertIsNotNone(action_info)
         self.assertIsNotNone(action_info['display'])
@@ -273,7 +273,7 @@ class TestDisplayMetadata(TestCase):
 
         # Verify field configs are in statezero's action registry
         from statezero.core.actions import action_registry
-        action_info = action_registry.get_action("select_amenities")
+        action_info = action_registry.get_action("workflow_FieldConfigWorkflow_select_amenities")
 
         configs = action_info['display'].field_display_configs
         self.assertEqual(len(configs), 2)
@@ -487,7 +487,7 @@ class TestDisplayMetadata(TestCase):
 
         # Display metadata should be in statezero registry, not in current_step_display
         from statezero.core.actions import action_registry
-        action_info = action_registry.get_action("test_action")
+        action_info = action_registry.get_action("workflow_StepTypeDisplayWorkflow_test_action")
         self.assertIsNotNone(action_info['display'])
         self.assertEqual(action_info['display'].display_title, "Manual Input Required")
 
