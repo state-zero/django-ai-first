@@ -144,8 +144,9 @@ def run_subflow(workflow_class: type, on_complete: Callable, on_create: Optional
             )
 
         @step()
-        def setup_subflow(self, child_run: WorkflowRun):
+        def setup_subflow(self, child_run: WorkflowRun, parent_run: WorkflowRun):
             # Called synchronously when subworkflow is created, before it starts
+            # Receives both the child and parent workflow runs
             pass
 
         @step()
@@ -692,14 +693,7 @@ class WorkflowEngine:
                 try:
                     workflow_instance = workflow_cls()
                     on_create_method = getattr(workflow_instance, result.on_create)
-
-                    # Check if the callback accepts child_run parameter
-                    import inspect
-                    sig = inspect.signature(on_create_method)
-                    if 'child_run' in sig.parameters:
-                        on_create_method(child_run=child_run)
-                    else:
-                        on_create_method()
+                    on_create_method(child_run, run)
 
                     # Commit context changes made by the callback
                     ctx_manager.commit_changes()

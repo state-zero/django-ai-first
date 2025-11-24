@@ -298,7 +298,7 @@ class SubflowTestCase(TestCase):
                 )
 
             @step()
-            def setup_child(self, child_run: WorkflowRun):
+            def setup_child(self, child_run: WorkflowRun, parent_run: WorkflowRun):
                 """Called synchronously when child is created"""
                 ctx = get_context()
                 ctx.created_child_id = child_run.id
