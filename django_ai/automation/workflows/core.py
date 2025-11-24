@@ -351,7 +351,8 @@ def event_workflow(
 
 def step(
     retry: Optional[Retry] = None,
-    start: bool = False
+    start: bool = False,
+    visible: bool = True
 ):
     """
     Decorator for workflow steps
@@ -359,11 +360,13 @@ def step(
     Args:
         retry: Retry policy for this step
         start: Whether this is the starting step
+        visible: Whether this step should be visible in the frontend (default True)
     """
     def decorator(func):
         func._is_workflow_step = True
         func._is_start_step = start
         func._step_retry = retry
+        func._step_visible = visible
         return func
 
     return decorator

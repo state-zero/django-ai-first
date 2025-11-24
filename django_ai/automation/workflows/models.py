@@ -83,6 +83,7 @@ class WorkflowRun(models.Model):
             'status': self.status,
             'current_step': self.current_step,
             'step_type': None,
+            'visible': True,  # Default to visible
             'completion_display': None,
             'waiting_display': None
         }
@@ -109,6 +110,9 @@ class WorkflowRun(models.Model):
         step_method = getattr(workflow_cls, self.current_step, None)
         if not step_method:
             return result
+
+        # Get visibility (defaults to True if not set)
+        result['visible'] = getattr(step_method, '_step_visible', True)
 
         # Determine step type
         if hasattr(step_method, "_has_statezero_action"):
