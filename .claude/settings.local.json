@@ -4,7 +4,8 @@
       "Bash(python manage.py test:*)",
       "Bash(python manage.py makemigrations:*)",
       "Bash(mkdir:*)",
-      "Bash(python -c:*)"
+      "Bash(python -c:*)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": []

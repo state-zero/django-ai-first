@@ -5,7 +5,7 @@ from django.db import connection
 from datetime import datetime, timedelta
 from ..events.models import Event, EventStatus
 from ..events.definitions import EventDefinition
-from tests.models import TestBooking, TestOrder, TestProperty, TestModelWithoutEvents
+from tests.models import TestBooking, TestOrder, TestProperty, TestModelWithoutEvents, TestUUIDModel
 
 class EventDefinitionTest(TestCase):
     """Test the EventDefinition helper class functionality"""
@@ -585,3 +585,115 @@ class EventNamespaceTest(TransactionTestCase):
         # Wildcard callback should have been called for all events
         for event in events:
             self.assertIn(f"wildcard_{event.namespace}_{event.id}", callback_results)
+
+
+class EventPrimaryKeyTypeCastingTest(TransactionTestCase):
+    """Test that events work correctly with different primary key types.
+
+    The Event model stores entity_id as a CharField (varchar), but when querying
+    related entities, we need to cast the entity_id to match the target model's
+    PK type (e.g., bigint for AutoField, uuid for UUIDField).
+    """
+
+    def test_events_with_integer_pk(self):
+        """Test that events work with standard integer (AutoField) primary keys"""
+        now = timezone.now()
+        booking = TestBooking.objects.create(
+            guest_name="Integer PK Test",
+            checkin_date=now + timedelta(days=1),
+            checkout_date=now + timedelta(days=2),
+            status="confirmed",
+        )
+
+        # Verify events were created
+        events = Event.objects.filter(
+            model_type=ContentType.objects.get_for_model(TestBooking),
+            entity_id=str(booking.id),
+        )
+        self.assertGreater(events.count(), 0)
+
+        # Test get_events query with date range (uses Cast internally)
+        due_events = Event.objects.get_events(
+            from_date=now,
+            to_date=now + timedelta(days=3),
+        )
+
+        # Should include at least one event from our booking
+        booking_events = [e for e in due_events if e.entity_id == str(booking.id)]
+        self.assertGreater(len(booking_events), 0)
+
+        # Verify entity is correctly fetched
+        for event in booking_events:
+            self.assertEqual(event.entity.id, booking.id)
+            self.assertEqual(event.entity.guest_name, "Integer PK Test")
+
+    def test_events_with_uuid_pk(self):
+        """Test that events work with UUID primary keys"""
+        now = timezone.now()
+        uuid_model = TestUUIDModel.objects.create(
+            name="UUID PK Test",
+            due_date=now + timedelta(days=1),
+            active=True,
+        )
+
+        # Verify events were created with UUID as entity_id
+        events = Event.objects.filter(
+            model_type=ContentType.objects.get_for_model(TestUUIDModel),
+            entity_id=str(uuid_model.id),
+        )
+        self.assertEqual(events.count(), 2)  # scheduled + immediate
+
+        event_names = set(events.values_list("event_name", flat=True))
+        self.assertEqual(event_names, {"uuid_scheduled_event", "uuid_immediate_event"})
+
+        # Test get_events query with date range (uses Cast internally for UUID)
+        due_events = Event.objects.get_events(
+            from_date=now,
+            to_date=now + timedelta(days=3),
+        )
+
+        # Should include events from our UUID model
+        uuid_events = [e for e in due_events if e.entity_id == str(uuid_model.id)]
+        self.assertGreater(len(uuid_events), 0)
+
+        # Verify entity is correctly fetched via UUID
+        for event in uuid_events:
+            self.assertEqual(event.entity.id, uuid_model.id)
+            self.assertEqual(event.entity.name, "UUID PK Test")
+
+    def test_mixed_pk_types_in_single_query(self):
+        """Test that get_events handles multiple models with different PK types"""
+        now = timezone.now()
+
+        # Create entity with integer PK
+        booking = TestBooking.objects.create(
+            guest_name="Mixed Test Booking",
+            checkin_date=now + timedelta(days=1),
+            checkout_date=now + timedelta(days=2),
+            status="confirmed",
+        )
+
+        # Create entity with UUID PK
+        uuid_model = TestUUIDModel.objects.create(
+            name="Mixed Test UUID",
+            due_date=now + timedelta(days=1),
+            active=True,
+        )
+
+        # Query events - this should handle both integer and UUID PKs
+        due_events = Event.objects.get_events(
+            from_date=now,
+            to_date=now + timedelta(days=3),
+        )
+
+        # Find events for both models
+        booking_events = [e for e in due_events if e.entity_id == str(booking.id)]
+        uuid_events = [e for e in due_events if e.entity_id == str(uuid_model.id)]
+
+        # Both should have events returned
+        self.assertGreater(len(booking_events), 0, "Should have events for integer PK model")
+        self.assertGreater(len(uuid_events), 0, "Should have events for UUID PK model")
+
+        # Verify entities are correctly resolved
+        self.assertEqual(booking_events[0].entity.guest_name, "Mixed Test Booking")
+        self.assertEqual(uuid_events[0].entity.name, "Mixed Test UUID")

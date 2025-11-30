@@ -1,6 +1,7 @@
 from django_ai.automation.events.models import EventDefinition, Event
 
 from django.db import models
+import uuid
 
 from django.db import models
 from django_ai.automation.events.definitions import EventDefinition
@@ -153,3 +154,23 @@ class HousekeepingTask(models.Model):
 
     def __str__(self):
         return f"{self.task_type} for {self.booking}"
+
+
+class TestUUIDModel(models.Model):
+    """Test model with UUID primary key to verify event entity_id casting"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=100)
+    due_date = models.DateTimeField(null=True, blank=True)
+    active = models.BooleanField(default=True)
+
+    events = [
+        EventDefinition(
+            "uuid_scheduled_event",
+            date_field="due_date",
+            condition=lambda instance: instance.active,
+        ),
+        EventDefinition(
+            "uuid_immediate_event",
+            condition=lambda instance: instance.active,
+        ),
+    ]

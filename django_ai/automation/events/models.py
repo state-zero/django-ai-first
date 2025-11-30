@@ -11,6 +11,7 @@ from django.db.models import (
     DateTimeField,
     F,
 )
+from django.db.models.functions import Cast
 from django.apps import apps
 from django.contrib.contenttypes.models import ContentType
 from datetime import datetime
@@ -67,16 +68,19 @@ class EventManager(models.Manager):
                     if to_date:
                         date_kw[f"{ed.date_field}__lte"] = to_date
 
+                    # Cast entity_id (varchar) to match the model's PK type
+                    entity_id_ref = Cast(OuterRef("entity_id"), output_field=model._meta.pk)
+
                     if date_kw:
                         ent_qs = model._default_manager.filter(
-                            pk=OuterRef("entity_id")
+                            pk=entity_id_ref
                         ).filter(**date_kw)
                     else:
-                        ent_qs = model._default_manager.filter(pk=OuterRef("entity_id"))
+                        ent_qs = model._default_manager.filter(pk=entity_id_ref)
                     scheduled_q |= Q(model_type=ct, event_name=ed.name) & Exists(ent_qs)
 
                     due_subq = model._default_manager.filter(
-                        pk=OuterRef("entity_id")
+                        pk=entity_id_ref
                     ).values(ed.date_field)[:1]
                     due_whens.append(
                         When(model_type=ct, event_name=ed.name, then=Subquery(due_subq))

@@ -85,10 +85,10 @@ class RunSubflow(StepResult):
 @dataclass
 class SubflowResult:
     """Result of a completed subworkflow, passed to the on_complete step."""
-    status: WorkflowStatus  # COMPLETED or FAILED
+    status: WorkflowStatus  # COMPLETED, FAILED, or CANCELLED
     context: BaseModel  # The child workflow's final context
     run_id: int  # The child workflow run ID
-    error: Optional[str] = None  # Error message if failed
+    error: Optional[str] = None  # Error message if failed/cancelled
 
 
 # Helper functions

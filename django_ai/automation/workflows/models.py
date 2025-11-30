@@ -131,6 +131,108 @@ class WorkflowRun(models.Model):
 
         return result
 
+    def cancel(self, reason: Optional[str] = None):
+        """
+        Cancel this workflow and all its active subflows.
+
+        Args:
+            reason: Optional reason for cancellation
+
+        Raises:
+            ValueError: If called on a subflow (must cancel from parent)
+        """
+        # Reject if this is a subflow - must cancel from parent
+        if self.parent_run_id:
+            raise ValueError(
+                "Cannot cancel subflow directly. Cancel the parent workflow instead."
+            )
+
+        self._cancel_recursive(reason)
+
+    def _cancel_recursive(self, reason: Optional[str] = None):
+        """Internal: Cancel this workflow and its children recursively."""
+        from .core import _workflows, _build_step_display
+
+        # Skip if already in terminal state
+        if self.status in [
+            WorkflowStatus.COMPLETED,
+            WorkflowStatus.FAILED,
+            WorkflowStatus.CANCELLED,
+        ]:
+            return
+
+        # First, cancel any active child subflow (depth-first)
+        if self.active_subworkflow_run_id:
+            try:
+                child_run = WorkflowRun.objects.get(id=self.active_subworkflow_run_id)
+                child_run._cancel_recursive(reason)
+            except WorkflowRun.DoesNotExist:
+                pass
+
+        # Now cancel this workflow
+        workflow_cls = _workflows.get(self.name)
+
+        StepExecution.objects.create(
+            workflow_run=self,
+            step_name=self.current_step,
+            status='cancelled',
+            error=reason or '',
+            step_display=_build_step_display(workflow_cls, self.current_step)
+        )
+
+        self.status = WorkflowStatus.CANCELLED
+        if reason:
+            self.error = reason
+        self.waiting_signal = ''
+        self.wake_at = None
+        self.save()
+
+    def retry_current_step(self):
+        """
+        Retry the current step, resetting error state.
+
+        Works on RUNNING, WAITING, SUSPENDED, and FAILED (resurrect) states.
+        If the workflow has an active subflow, that subflow is cancelled first.
+
+        Raises:
+            ValueError: If called on a subflow or on COMPLETED/CANCELLED state
+        """
+        from .core import engine
+
+        # Reject if this is a subflow
+        if self.parent_run_id:
+            raise ValueError(
+                "Cannot retry subflow directly. Retry the parent workflow instead."
+            )
+
+        # Reject terminal states (except FAILED which we resurrect)
+        if self.status == WorkflowStatus.COMPLETED:
+            raise ValueError("Cannot retry a completed workflow")
+        if self.status == WorkflowStatus.CANCELLED:
+            raise ValueError("Cannot retry a cancelled workflow")
+
+        # Cancel any active subflow first
+        if self.active_subworkflow_run_id:
+            try:
+                child_run = WorkflowRun.objects.get(id=self.active_subworkflow_run_id)
+                child_run._cancel_recursive("Parent workflow retried")
+            except WorkflowRun.DoesNotExist:
+                pass
+            self.active_subworkflow_run_id = None
+
+        # Reset state for retry
+        self.status = WorkflowStatus.RUNNING
+        self.error = ''
+        self.retry_count = 0
+        self.waiting_signal = ''
+        self.wake_at = None
+        self.on_timeout_step = ''
+        self.waiting_display = {}
+        self.save()
+
+        # Queue the current step for execution
+        engine._queue_step(self.id, self.current_step)
+
     class Meta:
         indexes = [
             models.Index(fields=["status", "waiting_signal"]),
@@ -152,6 +254,7 @@ class StepExecution(models.Model):
         choices=[
             ('completed', 'Completed'),
             ('failed', 'Failed'),
+            ('cancelled', 'Cancelled'),
         ]
     )
     error = models.TextField(blank=True)
