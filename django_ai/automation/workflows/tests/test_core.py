@@ -18,6 +18,8 @@ from ..core import (
     Retry,
 )
 from ..models import WorkflowRun, WorkflowStatus
+from ...testing import time_machine
+from ...queues.sync_executor import SynchronousExecutor
 
 
 class MockExecutor:
@@ -261,6 +263,53 @@ class TestWorkflowStates(WorkflowTestCase):
         self.assertEqual(run.status, WorkflowStatus.WAITING)
         self.assertIsNotNone(run.wake_at)
         self.assertEqual(run.waiting_signal, "")  # No signal for sleep
+
+    def test_sleep_wakes_up_after_duration(self):
+        """Test that workflow resumes after sleep duration using time machine"""
+
+        @workflow("test_sleep_wake")
+        class SleepWakeWorkflow:
+            class Context(BaseModel):
+                slept: bool = False
+                completed: bool = False
+
+            @step(start=True)
+            def sleep_step(self):
+                ctx = get_context()
+                if ctx.slept:
+                    return goto(self.after_sleep)
+                ctx.slept = True
+                return sleep(timedelta(minutes=30))
+
+            @step()
+            def after_sleep(self):
+                ctx = get_context()
+                ctx.completed = True
+                return complete()
+
+        with time_machine() as tm:
+            # Use SynchronousExecutor for full integration
+            executor = SynchronousExecutor()
+            engine.set_executor(executor)
+
+            run = engine.start("test_sleep_wake")
+
+            # Process immediately - workflow should go to sleep
+            tm.process()
+            run.refresh_from_db()
+            self.assertEqual(run.status, WorkflowStatus.WAITING)
+            self.assertFalse(run.data.get("completed", False))
+
+            # Advance time by 15 minutes - still sleeping
+            tm.advance(minutes=15)
+            run.refresh_from_db()
+            self.assertEqual(run.status, WorkflowStatus.WAITING)
+
+            # Advance another 20 minutes - should wake up and complete
+            tm.advance(minutes=20)
+            run.refresh_from_db()
+            self.assertEqual(run.status, WorkflowStatus.COMPLETED)
+            self.assertTrue(run.data["completed"])
 
     def test_wait_for_event_decorator(self):
         """Test wait for event decorator functionality"""

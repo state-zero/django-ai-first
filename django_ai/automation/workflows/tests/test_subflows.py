@@ -1,3 +1,4 @@
+from datetime import timedelta
 from django.test import TestCase
 from pydantic import BaseModel
 from typing import Optional
@@ -6,6 +7,7 @@ from ..core import (
     workflow,
     step,
     goto,
+    sleep,
     complete,
     fail,
     engine,
@@ -14,6 +16,8 @@ from ..core import (
     SubflowResult,
 )
 from ..models import WorkflowRun, WorkflowStatus
+from ...testing import time_machine
+from ...queues.sync_executor import SynchronousExecutor
 
 
 class MockExecutor:
@@ -356,6 +360,145 @@ class SubflowTestCase(TestCase):
         parent_run.refresh_from_db()
         self.assertEqual(parent_run.status, WorkflowStatus.COMPLETED)
         self.assertEqual(parent_run.data['final_result'], 21)
+
+
+class TestSubflowsWithTimeMachine(TestCase):
+    """Test subflows with time machine for full integration"""
+
+    def tearDown(self):
+        from ..core import _workflows, _event_workflows
+        _workflows.clear()
+        _event_workflows.clear()
+
+    def test_subflow_with_sleep_using_time_machine(self):
+        """Test parent workflow waiting for child that sleeps"""
+
+        @workflow("child_sleeps")
+        class ChildSleepsWorkflow:
+            class Context(BaseModel):
+                processed: bool = False
+                slept: bool = False
+
+            @step(start=True)
+            def start_child(self):
+                ctx = get_context()
+                if ctx.slept:
+                    return goto(self.finish_child)
+                ctx.slept = True
+                return sleep(timedelta(hours=1))
+
+            @step()
+            def finish_child(self):
+                ctx = get_context()
+                ctx.processed = True
+                return complete()
+
+        @workflow("parent_with_sleeping_child")
+        class ParentWorkflow:
+            class Context(BaseModel):
+                result: str = ""
+                active_subworkflow_run_id: Optional[int] = None
+
+            @step(start=True)
+            def start_parent(self):
+                return run_subflow(
+                    ChildSleepsWorkflow,
+                    on_complete=self.after_child
+                )
+
+            @step()
+            def after_child(self, subflow_result: SubflowResult):
+                ctx = get_context()
+                if subflow_result.context.processed:
+                    ctx.result = "child processed successfully"
+                return complete()
+
+        with time_machine() as tm:
+            executor = SynchronousExecutor()
+            engine.set_executor(executor)
+
+            # Start parent workflow
+            parent_run = engine.start("parent_with_sleeping_child")
+            tm.process()
+            parent_run.refresh_from_db()
+
+            # Parent should be suspended, waiting for child
+            self.assertEqual(parent_run.status, WorkflowStatus.SUSPENDED)
+            self.assertIsNotNone(parent_run.active_subworkflow_run_id)
+
+            # Child should be sleeping
+            child_run = WorkflowRun.objects.get(id=parent_run.active_subworkflow_run_id)
+            self.assertEqual(child_run.status, WorkflowStatus.WAITING)
+
+            # Advance time to wake the child
+            tm.advance(hours=2)
+
+            # Both should be complete now
+            child_run.refresh_from_db()
+            parent_run.refresh_from_db()
+            self.assertEqual(child_run.status, WorkflowStatus.COMPLETED)
+            self.assertTrue(child_run.data["processed"])
+            self.assertEqual(parent_run.status, WorkflowStatus.COMPLETED)
+            self.assertEqual(parent_run.data["result"], "child processed successfully")
+
+    def test_nested_subflows_run_to_completion(self):
+        """Test that time machine can run nested subflows to completion"""
+
+        @workflow("tm_innermost")
+        class InnermostWorkflow:
+            class Context(BaseModel):
+                value: int = 0
+
+            @step(start=True)
+            def process(self):
+                ctx = get_context()
+                ctx.value = 100
+                return complete()
+
+        @workflow("tm_middle")
+        class MiddleWorkflow:
+            class Context(BaseModel):
+                doubled: int = 0
+                active_subworkflow_run_id: Optional[int] = None
+
+            @step(start=True)
+            def run_inner(self):
+                return run_subflow(InnermostWorkflow, on_complete=self.after_inner)
+
+            @step()
+            def after_inner(self, subflow_result: SubflowResult):
+                ctx = get_context()
+                ctx.doubled = subflow_result.context.value * 2
+                return complete()
+
+        @workflow("tm_outer")
+        class OuterWorkflow:
+            class Context(BaseModel):
+                final: int = 0
+                active_subworkflow_run_id: Optional[int] = None
+
+            @step(start=True)
+            def run_middle(self):
+                return run_subflow(MiddleWorkflow, on_complete=self.finish)
+
+            @step()
+            def finish(self, subflow_result: SubflowResult):
+                ctx = get_context()
+                ctx.final = subflow_result.context.doubled + 1
+                return complete()
+
+        with time_machine() as tm:
+            executor = SynchronousExecutor()
+            engine.set_executor(executor)
+
+            # Start and run to completion
+            outer_run = engine.start("tm_outer")
+            tm.run_until_idle()
+
+            outer_run.refresh_from_db()
+            self.assertEqual(outer_run.status, WorkflowStatus.COMPLETED)
+            # 100 * 2 + 1 = 201
+            self.assertEqual(outer_run.data["final"], 201)
 
 
 if __name__ == "__main__":

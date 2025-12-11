@@ -18,6 +18,8 @@ from ..core import (
 )
 from ..models import WorkflowRun, WorkflowStatus, StepType
 from ..statezero_action import statezero_action
+from ...testing import time_machine
+from ...queues.sync_executor import SynchronousExecutor
 
 
 class MockExecutor:
@@ -277,3 +279,127 @@ class TestProgressHistoryAndStepType(TestCase):
         self.assertEqual(len(visible_executions), 3)
         self.assertEqual(len(hidden_executions), 1)
         self.assertEqual(hidden_executions[0].step_name, "hidden_step")
+
+
+class TestProgressWithTimeMachine(TestCase):
+    """Test progress tracking with time machine integration"""
+
+    def setUp(self):
+        from ..core import _workflows
+        _workflows.clear()
+
+    def tearDown(self):
+        from ..core import _workflows
+        _workflows.clear()
+
+    def test_progress_updates_through_sleep_wake_cycle(self):
+        """Test that progress updates correctly when workflow sleeps and wakes"""
+
+        @workflow("progress_sleep_test")
+        class ProgressSleepWorkflow:
+            class Context(BaseModel):
+                slept: bool = False
+                completed: bool = False
+
+            @step(start=True)
+            def initial(self):
+                return goto(self.process, progress=0.25)
+
+            @step()
+            def process(self):
+                ctx = get_context()
+                if ctx.slept:
+                    return goto(self.finalize, progress=0.75)
+                ctx.slept = True
+                return sleep(timedelta(hours=2))
+
+            @step()
+            def finalize(self):
+                ctx = get_context()
+                ctx.completed = True
+                return complete()
+
+        with time_machine() as tm:
+            executor = SynchronousExecutor()
+            engine.set_executor(executor)
+
+            run = engine.start("progress_sleep_test")
+            self.assertEqual(run.progress, 0.0)
+
+            # Process first step
+            tm.process()
+            run.refresh_from_db()
+            self.assertAlmostEqual(run.progress, 0.25, places=2)
+            self.assertEqual(run.step_executions.count(), 1)
+
+            # Process enters sleep
+            tm.process()
+            run.refresh_from_db()
+            self.assertEqual(run.status, WorkflowStatus.WAITING)
+            # Progress stays at 0.25 since we didn't set progress on sleep
+            self.assertAlmostEqual(run.progress, 0.25, places=2)
+            # Sleep doesn't create an execution record
+            self.assertEqual(run.step_executions.count(), 1)
+
+            # Advance time to wake up
+            tm.advance(hours=3)
+            run.refresh_from_db()
+
+            # Should be completed
+            self.assertEqual(run.status, WorkflowStatus.COMPLETED)
+            self.assertEqual(run.progress, 1.0)
+            self.assertTrue(run.data["completed"])
+            # Three steps were executed (initial, process after wake, finalize)
+            self.assertEqual(run.step_executions.count(), 3)
+
+    def test_step_executions_recorded_through_full_workflow(self):
+        """Test that all step executions are properly recorded when using time machine"""
+
+        @workflow("full_execution_test")
+        class FullExecutionWorkflow:
+            class Context(BaseModel):
+                steps_executed: list = []
+
+            @classmethod
+            def create_context(cls):
+                return cls.Context(steps_executed=[])
+
+            @step(start=True, title="Start Processing")
+            def step_one(self):
+                ctx = get_context()
+                ctx.steps_executed.append("step_one")
+                return goto(self.step_two, progress=0.33)
+
+            @step(title="Continue Processing")
+            def step_two(self):
+                ctx = get_context()
+                ctx.steps_executed.append("step_two")
+                return goto(self.step_three, progress=0.67)
+
+            @step(title="Finalize")
+            def step_three(self):
+                ctx = get_context()
+                ctx.steps_executed.append("step_three")
+                return complete()
+
+        with time_machine() as tm:
+            executor = SynchronousExecutor()
+            engine.set_executor(executor)
+
+            run = engine.start("full_execution_test")
+            tm.run_until_idle()
+
+            run.refresh_from_db()
+            self.assertEqual(run.status, WorkflowStatus.COMPLETED)
+            self.assertEqual(run.progress, 1.0)
+            self.assertEqual(run.data["steps_executed"], ["step_one", "step_two", "step_three"])
+
+            # Verify execution records
+            executions = list(run.step_executions.all())
+            self.assertEqual(len(executions), 3)
+            self.assertEqual([e.step_name for e in executions], ["step_one", "step_two", "step_three"])
+
+            # Verify step_display was captured
+            self.assertEqual(executions[0].step_display['step_title'], "Start Processing")
+            self.assertEqual(executions[1].step_display['step_title'], "Continue Processing")
+            self.assertEqual(executions[2].step_display['step_title'], "Finalize")
