@@ -164,7 +164,11 @@ def statezero_action(
 
         # Extract workflow class name from the method's qualified name
         # e.g., "ExpenseWorkflow.await_review" -> "ExpenseWorkflow"
-        class_name = step_func.__qualname__.rsplit('.', 1)[0] if '.' in step_func.__qualname__ else ''
+        # e.g., "test_func.<locals>.StepDisplayWorkflow.collect_info" -> "StepDisplayWorkflow"
+        # We need the immediate parent (the class name), not the full path
+        qualname_parts = step_func.__qualname__.split('.')
+        # The method name is the last part, the class name is the second to last
+        class_name = qualname_parts[-2] if len(qualname_parts) >= 2 else ''
 
         # Build action name: workflow_{ClassName}_{action_name}
         action_name = name or step_func.__name__
