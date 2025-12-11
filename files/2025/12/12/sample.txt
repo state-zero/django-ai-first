@@ -1,0 +1,2 @@
+This is a sample document for OCR testing.
+It contains important information.

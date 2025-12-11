@@ -49,7 +49,7 @@ class PusherEventCapture:
                         "timestamp": time.time(),
                     }
                 )
-                print(f"📡 Pusher Event: {event} on {channel}")
+                print(f"[PUSHER] Event: {event} on {channel}")
             return original_trigger(channel, event, data)
 
         return wrapper
@@ -99,7 +99,7 @@ class FullFeatureTestAgent(ConversationAgent):
 
     def get_response(self, message, request=None, files=None, **kwargs):
         """Main response handler with clean signature (sync)"""
-        print(f"🤖 Agent processing: {message}")
+        print(f"[AGENT] Processing: {message}")
 
         # Get agent context
         ctx = self.context
@@ -148,10 +148,10 @@ class FullFeatureTestAgent(ConversationAgent):
 
     def _streaming_response(self, original_message):
         """Generate a streaming-like response with multiple chunks (sync)"""
-        print("🔄 Starting streaming response...")
+        print("[STREAM] Starting streaming response...")
 
         with ResponseStream() as stream:
-            stream.write("🔄 Processing your streaming request")
+            stream.write("Processing your streaming request")
             time.sleep(0.01)
 
             stream.write("... analyzing content")
@@ -161,10 +161,10 @@ class FullFeatureTestAgent(ConversationAgent):
             time.sleep(0.01)
 
             stream.write(
-                f"... ✅ Complete! Your message '{original_message}' has been processed with streaming."
+                f"... Complete! Your message '{original_message}' has been processed with streaming."
             )
 
-        print(f"✅ Streaming complete: {stream.content}")
+        print(f"[OK] Streaming complete: {stream.content}")
         return stream.content
 
     def _process_files(self, files):
@@ -220,7 +220,7 @@ class FullConversationFlowTest(APITestCase):
 
         self.session = ConversationSession.objects.get(id=result["session_id"])
 
-        print(f"🚀 Test Setup Complete - Session: {self.session.id}")
+        print(f"[SETUP] Test Setup Complete - Session: {self.session.id}")
 
     def _send_message(self, content, files=None):
         """Send message via ConversationService with request context"""
@@ -271,12 +271,12 @@ class FullConversationFlowTest(APITestCase):
             mock_pusher_class.return_value = real_pusher
 
             print(f"\n{'='*60}")
-            print(f"🧪 FULL CONVERSATION FLOW TEST")
+            print(f"[TEST] FULL CONVERSATION FLOW TEST")
             print(f"Session: {self.session.id}")
             print(f"{'='*60}")
 
             # Step 1: Basic Response (no streaming, no Pusher events expected)
-            print(f"\n📝 Step 1: Basic Response")
+            print(f"\n[STEP 1] Basic Response")
             self.pusher_capture.clear_events()
 
             result1 = self._send_message("Give me a basic response")
@@ -288,14 +288,14 @@ class FullConversationFlowTest(APITestCase):
             )
 
             messages = self._verify_messages(1)  # Only agent message
-            print(f"   ✅ Messages created: {messages.count()}")
+            print(f"   [OK] Messages created: {messages.count()}")
             print(
-                f"   ✅ Pusher events (should be 0): {len(self.pusher_capture.events)}"
+                f"   [OK] Pusher events (should be 0): {len(self.pusher_capture.events)}"
             )
             self.assertEqual(len(self.pusher_capture.events), 0)
 
             # Step 2: Streaming Response (should generate Pusher events)
-            print(f"\n🌊 Step 2: Streaming Response")
+            print(f"\n[STEP 2] Streaming Response")
             self.pusher_capture.clear_events()
 
             result2 = self._send_message("Please stream this response")
@@ -306,19 +306,19 @@ class FullConversationFlowTest(APITestCase):
             self.assertIn("complete", result2["response"].lower())
 
             messages = self._verify_messages(2)  # 1 previous + 1 new
-            print(f"   ✅ Messages created: {messages.count()}")
+            print(f"   [OK] Messages created: {messages.count()}")
             print(
-                f"   ✅ Pusher events (should be > 0): {len(self.pusher_capture.events)}"
+                f"   [OK] Pusher events (should be > 0): {len(self.pusher_capture.events)}"
             )
             self.assertGreater(len(self.pusher_capture.events), 0)
 
             # Check for streaming chunk events
             chunk_events = self.pusher_capture.get_events_by_type("text_chunk")
-            print(f"   ✅ Streaming chunk events: {len(chunk_events)}")
+            print(f"   [OK] Streaming chunk events: {len(chunk_events)}")
             self.assertGreater(len(chunk_events), 0)
 
             # Step 3: Agent Function with Context Injection
-            print(f"\n🔧 Step 3: Agent Function with Context")
+            print(f"\n[STEP 3] Agent Function with Context")
             self.pusher_capture.clear_events()
 
             result3 = self._send_message("Show me user info")
@@ -330,11 +330,11 @@ class FullConversationFlowTest(APITestCase):
             self.assertIn("total_conversations", result3["response"])
 
             messages = self._verify_messages(3)  # 2 previous + 1 new
-            print(f"   ✅ Messages created: {messages.count()}")
-            print(f"   ✅ Context injection worked: username found in response")
+            print(f"   [OK] Messages created: {messages.count()}")
+            print(f"   [OK] Context injection worked: username found in response")
 
             # Step 4: Another Agent Function
-            print(f"\n🔐 Step 4: Permission Check Function")
+            print(f"\n[STEP 4] Permission Check Function")
             self.pusher_capture.clear_events()
 
             result4 = self._send_message("Check my permissions")
@@ -346,11 +346,11 @@ class FullConversationFlowTest(APITestCase):
             self.assertIn("admin", result4["response"])  # Should detect admin user
 
             messages = self._verify_messages(4)  # 3 previous + 1 new
-            print(f"   ✅ Messages created: {messages.count()}")
-            print(f"   ✅ Permission check worked")
+            print(f"   [OK] Messages created: {messages.count()}")
+            print(f"   [OK] Permission check worked")
 
             # Step 5: Widget Display
-            print(f"\n🎛️  Step 5: Widget Display")
+            print(f"\n[STEP 5] Widget Display")
             self.pusher_capture.clear_events()
 
             result5 = self._send_message("Show me a widget")
@@ -360,11 +360,11 @@ class FullConversationFlowTest(APITestCase):
             self.assertEqual(result5["response"], "Interactive widget displayed above!")
 
             messages = self._verify_messages(5)  # 4 previous + 1 new
-            print(f"   ✅ Messages created: {messages.count()}")
-            print(f"   ✅ Widget display worked")
+            print(f"   [OK] Messages created: {messages.count()}")
+            print(f"   [OK] Widget display worked")
 
             # Step 6: Context Persistence Test
-            print(f"\n💾 Step 6: Context Persistence Test")
+            print(f"\n[STEP 6] Context Persistence Test")
             self.pusher_capture.clear_events()
 
             result6 = self._send_message("Echo something")
@@ -375,17 +375,17 @@ class FullConversationFlowTest(APITestCase):
             self.assertIn("Echo #", result6["response"])
 
             messages = self._verify_messages(6)  # 5 previous + 1 new
-            print(f"   ✅ Messages created: {messages.count()}")
-            print(f"   ✅ Context persistence worked")
+            print(f"   [OK] Messages created: {messages.count()}")
+            print(f"   [OK] Context persistence worked")
 
             # Step 7: Final Summary
-            print(f"\n📊 Step 7: Conversation Summary")
+            print(f"\n[STEP 7] Conversation Summary")
 
             final_messages = ConversationMessage.objects.filter(
                 session=self.session
             ).order_by("timestamp")
 
-            print(f"\n📋 Final Conversation Summary:")
+            print(f"\n[SUMMARY] Final Conversation Summary:")
             print(f"   Total messages: {final_messages.count()}")
             print(f"   Session ID: {self.session.id}")
 
@@ -406,17 +406,17 @@ class FullConversationFlowTest(APITestCase):
             self.assertTrue(any("Echo #" in r for r in responses))
 
             print(f"\n{'='*60}")
-            print(f"🎉 FULL CONVERSATION FLOW TEST COMPLETE")
-            print(f"✅ All 6 conversation steps successful:")
-            print(f"   1. Basic response ✅")
-            print(f"   2. Streaming response ✅")
-            print(f"   3. Context injection ✅")
-            print(f"   4. Agent functions ✅")
-            print(f"   5. Widget display ✅")
-            print(f"   6. Context persistence ✅")
-            print(f"✅ Total messages: {final_messages.count()}")
-            print(f"✅ Clean context system working properly")
-            print(f"✅ Request passing working properly")
+            print(f"[DONE] FULL CONVERSATION FLOW TEST COMPLETE")
+            print(f"[OK] All 6 conversation steps successful:")
+            print(f"   1. Basic response [OK]")
+            print(f"   2. Streaming response [OK]")
+            print(f"   3. Context injection [OK]")
+            print(f"   4. Agent functions [OK]")
+            print(f"   5. Widget display [OK]")
+            print(f"   6. Context persistence [OK]")
+            print(f"[OK] Total messages: {final_messages.count()}")
+            print(f"[OK] Clean context system working properly")
+            print(f"[OK] Request passing working properly")
             print(f"{'='*60}")
 
 # django_ai/conversations/tests.py (add this new test class)
@@ -480,7 +480,7 @@ class PusherAuthTest(APITestCase):
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('auth', response.data)
-        print(f"✅ User1 successfully authenticated to their own session")
+        print(f"[OK] User1 successfully authenticated to their own session")
 
     def test_authenticated_user_cannot_access_other_session(self):
         """Test that authenticated users cannot access other users' sessions"""
@@ -514,7 +514,7 @@ class PusherAuthTest(APITestCase):
         
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertIn('error', response.data)
-        print(f"✅ User2 correctly denied access to User1's session")
+        print(f"[OK] User2 correctly denied access to User1's session")
 
     def test_anonymous_user_can_access_own_session(self):
         """Test that anonymous users can access their own sessions via anonymous_id"""
@@ -544,7 +544,7 @@ class PusherAuthTest(APITestCase):
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('auth', response.data)
-        print(f"✅ Anonymous user successfully authenticated to their own session")
+        print(f"[OK] Anonymous user successfully authenticated to their own session")
 
     def test_anonymous_user_cannot_access_other_session(self):
         """Test that anonymous users cannot access sessions with different anonymous_id"""
@@ -568,7 +568,7 @@ class PusherAuthTest(APITestCase):
         
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertIn('error', response.data)
-        print(f"✅ Anonymous user correctly denied access to different session")
+        print(f"[OK] Anonymous user correctly denied access to different session")
 
     def test_invalid_channel_name(self):
         """Test that invalid channel names are rejected"""
@@ -585,7 +585,7 @@ class PusherAuthTest(APITestCase):
         
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertIn('error', response.data)
-        print(f"✅ Invalid channel name correctly rejected")
+        print(f"[OK] Invalid channel name correctly rejected")
 
     def test_missing_parameters(self):
         """Test that missing required parameters are rejected"""
@@ -612,7 +612,7 @@ class PusherAuthTest(APITestCase):
         )
         
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        print(f"✅ Missing parameters correctly rejected")
+        print(f"[OK] Missing parameters correctly rejected")
 
     def test_nonexistent_session(self):
         """Test that non-existent sessions are rejected"""
@@ -631,7 +631,7 @@ class PusherAuthTest(APITestCase):
         
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertIn('error', response.data)
-        print(f"✅ Non-existent session correctly rejected")
+        print(f"[OK] Non-existent session correctly rejected")
 
     def test_pusher_auth_response_format(self):
         """Test that successful auth returns proper Pusher format"""
@@ -670,5 +670,5 @@ class PusherAuthTest(APITestCase):
         self.assertIsInstance(auth_value, str)
         self.assertIn(':', auth_value)
         
-        print(f"✅ Pusher auth response format is correct")
+        print(f"[OK] Pusher auth response format is correct")
         print(f"   Auth signature: {auth_value[:20]}...")

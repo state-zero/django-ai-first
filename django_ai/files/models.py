@@ -23,10 +23,12 @@ class Folder(models.Model):
 
     class Meta:
         ordering = ['name']
-        models.UniqueConstraint(
-            fields=['name', 'parent', 'owner'],
-            name='unique_folder_name_per_parent'
-        )
+        constraints = [
+            models.UniqueConstraint(
+                fields=['name', 'parent', 'owner'],
+                name='unique_folder_name_per_parent'
+            )
+        ]
         indexes = [
             models.Index(fields=['owner', 'parent']),
             models.Index(fields=['name']),
