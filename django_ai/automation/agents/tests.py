@@ -357,15 +357,8 @@ class AgentIntegrationTests(TransactionTestCase):
             tm.advance(minutes=31)
             self.assertIn("followup_sent", handler_log)
 
-    def test_handler_with_negative_offset_executes_when_event_fires(self):
-        """
-        Handler with negative offset executes immediately when the event fires,
-        since its scheduled_at will be in the past relative to the event's at time.
-
-        Note: Currently, handlers are only scheduled when the event fires (at event.at),
-        not proactively. So a -180 minute offset handler fires immediately when the
-        move_in event fires (at checkin time), not 3 hours before.
-        """
+    def test_handler_with_negative_offset_executes_before_event_time(self):
+        """Handler with negative offset executes before the event's scheduled time."""
         handler_log = []
 
         @agent("pre_checkin_agent", spawn_on="booking_created")
@@ -385,8 +378,8 @@ class AgentIntegrationTests(TransactionTestCase):
                 handler_log.append("pre_checkin_sent")
 
         with time_machine() as tm:
-            # Checkin is 2 hours from now
-            checkin_time = timezone.now() + timedelta(hours=2)
+            # Checkin is 5 hours from now
+            checkin_time = timezone.now() + timedelta(hours=5)
 
             booking = Booking.objects.create(
                 guest=self.guest,
@@ -395,23 +388,16 @@ class AgentIntegrationTests(TransactionTestCase):
                 status="confirmed",
             )
 
-            # Handler not yet fired - move_in event hasn't occurred
+            # Advance 1 hour - still 4 hours before checkin, 1 hour before handler
+            tm.advance(hours=1)
             self.assertNotIn("pre_checkin_sent", handler_log)
 
-            # Advance to just past checkin - move_in event fires, handler runs immediately
-            # (since scheduled_at = checkin - 180min is in the past)
-            tm.advance(hours=2, minutes=1)
+            # Advance 1 more hour - now 3 hours before checkin, handler should fire
+            tm.advance(hours=1)
             self.assertIn("pre_checkin_sent", handler_log)
 
     def test_multiple_handlers_different_offsets_fire_in_order(self):
-        """
-        Multiple handlers for same event with different offsets fire at correct times.
-
-        Note: Handlers are only scheduled when the event fires. So:
-        - Negative offset handlers fire immediately (scheduled_at is in the past)
-        - Zero offset handlers fire immediately
-        - Positive offset handlers fire after their delay
-        """
+        """Multiple handlers for same event with different offsets fire at correct times."""
         handler_log = []
 
         @agent("multi_offset_agent", spawn_on="booking_created")
@@ -426,7 +412,7 @@ class AgentIntegrationTests(TransactionTestCase):
             def create_context(cls, event):
                 return cls.Context()
 
-            @handler("move_in", offset_minutes=-60)  # Would be 1 hour before, fires immediately
+            @handler("move_in", offset_minutes=-60)  # 1 hour before
             def one_hour_before(self, ctx):
                 handler_log.append("1h_before")
 
@@ -449,20 +435,18 @@ class AgentIntegrationTests(TransactionTestCase):
                 status="confirmed",
             )
 
-            # Before checkin - no handlers fire yet
-            tm.advance(hours=1)
-            self.assertNotIn("1h_before", handler_log)
+            # Advance to 1 hour before checkin - first handler fires
+            tm.advance(hours=1, minutes=1)
+            self.assertIn("1h_before", handler_log)
             self.assertNotIn("at_checkin", handler_log)
             self.assertNotIn("1h_after", handler_log)
 
-            # Advance to checkin time - event fires
-            # Negative offset and zero offset handlers fire immediately
-            tm.advance(hours=1, minutes=1)
-            self.assertIn("1h_before", handler_log)  # Fired immediately (was in past)
-            self.assertIn("at_checkin", handler_log)  # Fired immediately
-            self.assertNotIn("1h_after", handler_log)  # Not yet - needs 1 more hour
+            # Advance to checkin time - second handler fires
+            tm.advance(hours=1)
+            self.assertIn("at_checkin", handler_log)
+            self.assertNotIn("1h_after", handler_log)
 
-            # Advance 1 hour past checkin - positive offset handler fires
+            # Advance 1 hour past checkin - third handler fires
             tm.advance(hours=1)
             self.assertIn("1h_after", handler_log)
 
@@ -545,12 +529,7 @@ class AgentIntegrationTests(TransactionTestCase):
             self.assertEqual(agent_run.context["messages"], ["confirmed"])
 
     def test_complete_reservation_journey(self):
-        """
-        Test a realistic reservation journey with multiple timed handlers.
-
-        Note: Handlers are scheduled when events fire, so negative offset handlers
-        fire immediately when the event fires (not before).
-        """
+        """Test a realistic reservation journey with multiple timed handlers."""
         journey_log = []
 
         @agent("reservation_journey", spawn_on="booking_created")
@@ -577,7 +556,7 @@ class AgentIntegrationTests(TransactionTestCase):
             def send_confirmation(self, ctx):
                 journey_log.append(f"confirmation:{ctx.reservation_id}")
 
-            @handler("move_in", offset_minutes=-180)  # Fires immediately when move_in event fires
+            @handler("move_in", offset_minutes=-180)  # 3 hours before
             def send_pre_checkin(self, ctx):
                 journey_log.append(f"pre_checkin:{ctx.reservation_id}")
                 ctx.pre_checkin_sent = True
@@ -593,8 +572,8 @@ class AgentIntegrationTests(TransactionTestCase):
                 ctx.checkout_sent = True
 
         with time_machine() as tm:
-            # Checkin is 2 hours from now, checkout 2 days later
-            checkin = timezone.now() + timedelta(hours=2)
+            # Checkin is 5 hours from now, checkout 2 days later
+            checkin = timezone.now() + timedelta(hours=5)
             checkout = checkin + timedelta(days=2)
 
             booking = Booking.objects.create(
@@ -607,18 +586,16 @@ class AgentIntegrationTests(TransactionTestCase):
             # Confirmation should have been sent immediately (booking_confirmed is immediate)
             self.assertIn(f"confirmation:{booking.id}", journey_log)
 
-            # Before checkin - move_in handlers haven't fired yet
-            tm.advance(hours=1)
-            self.assertNotIn(f"pre_checkin:{booking.id}", journey_log)
+            # Advance to 3 hours before checkin (2 hours from now)
+            tm.advance(hours=2, minutes=1)
+            self.assertIn(f"pre_checkin:{booking.id}", journey_log)
             self.assertNotIn(f"welcome:{booking.id}", journey_log)
 
-            # Advance to checkin time - move_in event fires
-            # Both pre_checkin (-180 offset) and welcome (0 offset) fire immediately
-            tm.advance(hours=1, minutes=1)
-            self.assertIn(f"pre_checkin:{booking.id}", journey_log)
+            # Advance to checkin time
+            tm.advance(hours=3)
             self.assertIn(f"welcome:{booking.id}", journey_log)
 
-            # Advance to checkout time - move_out event fires
+            # Advance to checkout time
             tm.advance(days=2)
             self.assertIn(f"checkout:{booking.id}", journey_log)
 

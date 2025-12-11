@@ -13,7 +13,7 @@ from ..workflows.core import (
 from ..workflows.models import WorkflowRun, WorkflowStatus
 
 from .models import AgentRun, AgentStatus, HandlerExecution, HandlerStatus
-from ..events.callbacks import on_event
+from ..events.callbacks import on_event, on_event_created
 
 
 # Handler metadata stored on decorated methods
@@ -211,9 +211,9 @@ def _register_event_handler(
     handler_info: HandlerInfo,
     agent_class: type,
 ):
-    """Register callback to execute handler when event occurs at specified offset"""
+    """Register callback to schedule handler when event is created (not when it occurs)"""
 
-    @on_event(event_name=handler_info.event_name, namespace="*")
+    @on_event_created(event_name=handler_info.event_name, namespace="*")
     def handle_event_for_handler(event):
         # Schedule handler execution via the agent engine
         agent_engine.schedule_handler(
@@ -315,15 +315,17 @@ class AgentEngine:
             # No agent exists for this namespace - skip handler
             return None
 
-        # Calculate scheduled time
-        if offset_minutes != 0 and hasattr(event, 'at') and event.at:
-            delay = timedelta(minutes=abs(offset_minutes))
+        # Calculate scheduled time based on event.at and offset
+        if hasattr(event, 'at') and event.at:
             if offset_minutes < 0:
-                scheduled_at = event.at - delay
+                scheduled_at = event.at - timedelta(minutes=abs(offset_minutes))
+            elif offset_minutes > 0:
+                scheduled_at = event.at + timedelta(minutes=offset_minutes)
             else:
-                scheduled_at = event.at + delay
+                scheduled_at = event.at
         else:
-            scheduled_at = timezone.now()
+            # No event.at (immediate event) - schedule now + offset
+            scheduled_at = timezone.now() + timedelta(minutes=offset_minutes)
 
         # Create handler execution record
         execution = HandlerExecution.objects.create(
