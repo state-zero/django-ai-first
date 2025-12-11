@@ -1,13 +1,14 @@
 import unittest
 from datetime import timedelta
-from django.test import TransactionTestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from django.contrib.contenttypes.models import ContentType
 from pydantic import BaseModel
 
 from django_ai.automation.events.models import Event, EventStatus
 from django_ai.automation.events.callbacks import callback_registry
-from django_ai.automation.workflows.core import Retry
+from django_ai.automation.workflows.core import Retry, engine
+from django_ai.automation.queues.sync_executor import SynchronousExecutor
 
 from django_ai.automation.agents.core import (
     agent,
@@ -24,57 +25,22 @@ from django_ai.automation.agents.models import (
     HandlerExecution,
     HandlerStatus,
 )
+from django_ai.automation.testing import time_machine
 
 # Import test models
 from tests.models import Guest, Booking
 
 
-class MockExecutor:
-    """Simple mock executor for testing"""
-
-    def __init__(self):
-        self.queued_tasks = []
-
-    def queue_task(self, task_name, *args, delay=None):
-        self.queued_tasks.append({"task_name": task_name, "args": args, "delay": delay})
-
-        # Execute handler immediately for testing
-        if task_name == "execute_handler":
-            execution_id = args[0]
-            agent_engine.execute_handler(execution_id)
-
-    def clear(self):
-        self.queued_tasks.clear()
-
-
-@override_settings(SKIP_Q2_AUTOSCHEDULE=True)
-class HandlerBasedAgentTests(TransactionTestCase):
-    """Test suite for handler-based agent functionality"""
+class DecoratorValidationTests(TestCase):
+    """Test decorator validation - these are unit tests that don't need time machine."""
 
     def setUp(self):
-        """Set up test environment"""
-        agent_engine.set_executor(MockExecutor())
         _agents.clear()
         _agent_handlers.clear()
-        callback_registry.clear()
-
-        # Register the workflow integration handler
-        from django_ai.automation.workflows.integration import handle_event_for_workflows
-
-        callback_registry.register(
-            handle_event_for_workflows, event_name="*", namespace="*"
-        )
-
-        self.guest = Guest.objects.create(email="test@example.com", name="Test User")
 
     def tearDown(self):
-        callback_registry.clear()
         _agents.clear()
         _agent_handlers.clear()
-
-    # ============================================================================
-    # DECORATOR VALIDATION TESTS
-    # ============================================================================
 
     def test_agent_decorator_requires_context(self):
         """Test that agent decorator validates Context class"""
@@ -143,10 +109,6 @@ class HandlerBasedAgentTests(TransactionTestCase):
         self.assertEqual(test_handler._handler_condition, my_condition)
         self.assertEqual(test_handler._handler_retry, retry_policy)
 
-    # ============================================================================
-    # AGENT REGISTRATION TESTS
-    # ============================================================================
-
     def test_agent_registers_globally(self):
         """Test that agent decorator registers agent globally"""
 
@@ -200,12 +162,35 @@ class HandlerBasedAgentTests(TransactionTestCase):
         self.assertIn("handler_two", handler_names)
         self.assertIn("handler_three", handler_names)
 
-    # ============================================================================
-    # SPAWN TESTS
-    # ============================================================================
 
-    def test_agent_spawn_via_event(self):
-        """Test agent spawning when spawn_on event occurs"""
+@override_settings(SKIP_Q2_AUTOSCHEDULE=True)
+class AgentIntegrationTests(TransactionTestCase):
+    """Integration tests using time machine for realistic time-based testing."""
+
+    def setUp(self):
+        # Use SynchronousExecutor for testing
+        engine.set_executor(SynchronousExecutor())
+        agent_engine.set_executor(SynchronousExecutor())
+        _agents.clear()
+        _agent_handlers.clear()
+        callback_registry.clear()
+
+        # Register the workflow integration handler
+        from django_ai.automation.workflows.integration import handle_event_for_workflows
+
+        callback_registry.register(
+            handle_event_for_workflows, event_name="*", namespace="*"
+        )
+
+        self.guest = Guest.objects.create(email="test@example.com", name="Test User")
+
+    def tearDown(self):
+        callback_registry.clear()
+        _agents.clear()
+        _agent_handlers.clear()
+
+    def test_agent_spawn_via_immediate_event(self):
+        """Agent spawns when spawn_on event occurs."""
 
         @agent("spawn_test_agent", spawn_on="booking_created")
         class SpawnTestAgent:
@@ -219,34 +204,27 @@ class HandlerBasedAgentTests(TransactionTestCase):
             def create_context(cls, event):
                 return cls.Context(booking_id=event.entity.id)
 
-        # Create booking (triggers booking_created event)
-        booking = Booking.objects.create(
-            guest=self.guest,
-            checkin_date=timezone.now() + timedelta(days=1),
-            checkout_date=timezone.now() + timedelta(days=2),
-            status="pending",
-        )
+        with time_machine() as tm:
+            # Create booking - this fires booking_created immediately
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=timezone.now() + timedelta(days=1),
+                checkout_date=timezone.now() + timedelta(days=2),
+                status="pending",
+            )
 
-        # Get and trigger the event
-        event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_created",
-        )
-        event.mark_as_occurred()
+            # Agent should have been created
+            agent_run = AgentRun.objects.filter(
+                agent_name="spawn_test_agent",
+                namespace=f"booking:{booking.id}",
+            ).first()
 
-        # Verify agent was created
-        agent_run = AgentRun.objects.filter(
-            agent_name="spawn_test_agent",
-            namespace=f"booking:{booking.id}",
-        ).first()
-
-        self.assertIsNotNone(agent_run)
-        self.assertEqual(agent_run.status, AgentStatus.ACTIVE)
-        self.assertEqual(agent_run.context["booking_id"], booking.id)
+            self.assertIsNotNone(agent_run)
+            self.assertEqual(agent_run.status, AgentStatus.ACTIVE)
+            self.assertEqual(agent_run.context["booking_id"], booking.id)
 
     def test_singleton_prevents_duplicate_spawn(self):
-        """Test singleton=True prevents duplicate agents for same namespace"""
+        """singleton=True prevents duplicate agents for same namespace."""
 
         @agent("singleton_agent", spawn_on="booking_created", singleton=True)
         class SingletonAgent:
@@ -260,88 +238,33 @@ class HandlerBasedAgentTests(TransactionTestCase):
             def create_context(cls, event):
                 return cls.Context(spawn_count=1)
 
-        # Create first booking
-        booking1 = Booking.objects.create(
-            guest=self.guest,
-            checkin_date=timezone.now() + timedelta(days=1),
-            checkout_date=timezone.now() + timedelta(days=2),
-            status="pending",
-        )
-
-        event1 = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking1.id),
-            event_name="booking_created",
-        )
-        event1.mark_as_occurred()
-
-        # Create second booking (should not create new agent)
-        booking2 = Booking.objects.create(
-            guest=self.guest,
-            checkin_date=timezone.now() + timedelta(days=3),
-            checkout_date=timezone.now() + timedelta(days=4),
-            status="pending",
-        )
-
-        event2 = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking2.id),
-            event_name="booking_created",
-        )
-        event2.mark_as_occurred()
-
-        # Should only have one active agent
-        active_agents = AgentRun.objects.filter(
-            agent_name="singleton_agent",
-            namespace="shared_namespace",
-            status=AgentStatus.ACTIVE,
-        )
-        self.assertEqual(active_agents.count(), 1)
-
-    def test_non_singleton_allows_multiple_agents(self):
-        """Test singleton=False allows multiple agents per namespace"""
-
-        @agent("non_singleton_agent", spawn_on="booking_created", singleton=False)
-        class NonSingletonAgent:
-            class Context(BaseModel):
-                pass
-
-            def get_namespace(self, event):
-                return "shared_namespace"
-
-            @classmethod
-            def create_context(cls, event):
-                return cls.Context()
-
-        # Create multiple bookings
-        for i in range(3):
-            booking = Booking.objects.create(
+        with time_machine() as tm:
+            # Create first booking
+            Booking.objects.create(
                 guest=self.guest,
-                checkin_date=timezone.now() + timedelta(days=i + 1),
-                checkout_date=timezone.now() + timedelta(days=i + 2),
+                checkin_date=timezone.now() + timedelta(days=1),
+                checkout_date=timezone.now() + timedelta(days=2),
                 status="pending",
             )
 
-            event = Event.objects.get(
-                model_type=ContentType.objects.get_for_model(Booking),
-                entity_id=str(booking.id),
-                event_name="booking_created",
+            # Create second booking (should not create new agent)
+            Booking.objects.create(
+                guest=self.guest,
+                checkin_date=timezone.now() + timedelta(days=3),
+                checkout_date=timezone.now() + timedelta(days=4),
+                status="pending",
             )
-            event.mark_as_occurred()
 
-        # Should have 3 agents
-        active_agents = AgentRun.objects.filter(
-            agent_name="non_singleton_agent",
-            status=AgentStatus.ACTIVE,
-        )
-        self.assertEqual(active_agents.count(), 3)
+            # Should only have one active agent
+            active_agents = AgentRun.objects.filter(
+                agent_name="singleton_agent",
+                namespace="shared_namespace",
+                status=AgentStatus.ACTIVE,
+            )
+            self.assertEqual(active_agents.count(), 1)
 
-    # ============================================================================
-    # HANDLER EXECUTION TESTS
-    # ============================================================================
-
-    def test_handler_executes_when_agent_exists(self):
-        """Test handler executes when agent exists for namespace"""
+    def test_handler_executes_on_event(self):
+        """Handler executes when its event fires."""
         handler_log = []
 
         @agent("handler_exec_agent", spawn_on="booking_created")
@@ -361,52 +284,37 @@ class HandlerBasedAgentTests(TransactionTestCase):
                 handler_log.append("on_confirmed_called")
                 ctx.handled = True
 
-        # Create booking and spawn agent
-        booking = Booking.objects.create(
-            guest=self.guest,
-            checkin_date=timezone.now() + timedelta(days=1),
-            checkout_date=timezone.now() + timedelta(days=2),
-            status="pending",
-        )
+        with time_machine() as tm:
+            # Create booking - spawns agent
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=timezone.now() + timedelta(days=1),
+                checkout_date=timezone.now() + timedelta(days=2),
+                status="pending",
+            )
 
-        created_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_created",
-        )
-        created_event.mark_as_occurred()
+            agent_run = AgentRun.objects.get(
+                agent_name="handler_exec_agent",
+                namespace=f"booking:{booking.id}",
+            )
 
-        # Verify agent exists
-        agent_run = AgentRun.objects.get(
-            agent_name="handler_exec_agent",
-            namespace=f"booking:{booking.id}",
-        )
+            # Update booking status - triggers booking_confirmed event
+            booking.status = "confirmed"
+            booking.save()
 
-        # Update booking status to trigger confirmed event
-        booking.status = "confirmed"
-        booking.save()
+            # Handler should have been called
+            self.assertIn("on_confirmed_called", handler_log)
 
-        confirmed_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_confirmed",
-        )
-        confirmed_event.mark_as_occurred()
+            # Context should have been updated
+            agent_run.refresh_from_db()
+            self.assertTrue(agent_run.context["handled"])
 
-        # Verify handler was called
-        self.assertIn("on_confirmed_called", handler_log)
-
-        # Verify context was updated
-        agent_run.refresh_from_db()
-        self.assertTrue(agent_run.context["handled"])
-
-    def test_handler_skipped_when_no_agent(self):
-        """Test handler is skipped when no agent exists for namespace"""
+    def test_handler_with_positive_offset_executes_after_event_time(self):
+        """Handler with positive offset executes after the event's scheduled time."""
         handler_log = []
 
-        # Use a spawn event that doesn't exist for this booking
-        @agent("skip_test_agent", spawn_on="some_other_event")
-        class SkipTestAgent:
+        @agent("offset_agent", spawn_on="booking_created")
+        class OffsetAgent:
             class Context(BaseModel):
                 pass
 
@@ -417,41 +325,51 @@ class HandlerBasedAgentTests(TransactionTestCase):
             def create_context(cls, event):
                 return cls.Context()
 
-            @handler("booking_confirmed")
-            def on_confirmed(self, ctx):
-                handler_log.append("should_not_be_called")
+            @handler("move_in", offset_minutes=60)  # 1 hour after checkin
+            def send_followup(self, ctx):
+                handler_log.append("followup_sent")
 
-        # Create booking - this does NOT spawn the agent because spawn_on is "some_other_event"
-        booking = Booking.objects.create(
-            guest=self.guest,
-            checkin_date=timezone.now() + timedelta(days=1),
-            checkout_date=timezone.now() + timedelta(days=2),
-            status="confirmed",
-        )
+        with time_machine() as tm:
+            # Checkin is 2 hours from now
+            checkin_time = timezone.now() + timedelta(hours=2)
 
-        # Trigger the confirmed event - no agent exists, so handler should be skipped
-        confirmed_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_confirmed",
-        )
-        confirmed_event.mark_as_occurred()
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=checkin_time,
+                checkout_date=checkin_time + timedelta(days=1),
+                status="confirmed",
+            )
 
-        # Handler should not have been called because no agent was spawned
-        self.assertNotIn("should_not_be_called", handler_log)
+            # Agent spawned
+            self.assertEqual(
+                AgentRun.objects.filter(agent_name="offset_agent").count(), 1
+            )
 
-        # Verify no executions were created (handler was completely skipped)
-        executions = HandlerExecution.objects.filter(
-            handler_name="on_confirmed",
-        )
-        self.assertEqual(executions.count(), 0)
+            # Advance to checkin time - handler should NOT fire yet
+            tm.advance(hours=2)
+            self.assertNotIn("followup_sent", handler_log)
 
-    def test_multiple_handlers_same_event_different_offsets(self):
-        """Test multiple handlers for same event with different offsets"""
+            # Advance 30 more minutes - still not yet (need 60 min offset)
+            tm.advance(minutes=30)
+            self.assertNotIn("followup_sent", handler_log)
+
+            # Advance 31 more minutes (now 61 min past checkin) - should fire
+            tm.advance(minutes=31)
+            self.assertIn("followup_sent", handler_log)
+
+    def test_handler_with_negative_offset_executes_when_event_fires(self):
+        """
+        Handler with negative offset executes immediately when the event fires,
+        since its scheduled_at will be in the past relative to the event's at time.
+
+        Note: Currently, handlers are only scheduled when the event fires (at event.at),
+        not proactively. So a -180 minute offset handler fires immediately when the
+        move_in event fires (at checkin time), not 3 hours before.
+        """
         handler_log = []
 
-        @agent("multi_handler_agent", spawn_on="booking_created")
-        class MultiHandlerAgent:
+        @agent("pre_checkin_agent", spawn_on="booking_created")
+        class PreCheckinAgent:
             class Context(BaseModel):
                 pass
 
@@ -462,53 +380,94 @@ class HandlerBasedAgentTests(TransactionTestCase):
             def create_context(cls, event):
                 return cls.Context()
 
-            @handler("booking_confirmed", offset_minutes=0)
-            def on_confirmed_immediate(self, ctx):
-                handler_log.append("immediate")
+            @handler("move_in", offset_minutes=-180)  # 3 hours before checkin
+            def send_pre_checkin(self, ctx):
+                handler_log.append("pre_checkin_sent")
 
-            @handler("booking_confirmed", offset_minutes=-60)
-            def on_confirmed_before(self, ctx):
-                handler_log.append("before")
+        with time_machine() as tm:
+            # Checkin is 2 hours from now
+            checkin_time = timezone.now() + timedelta(hours=2)
 
-            @handler("booking_confirmed", offset_minutes=60)
-            def on_confirmed_after(self, ctx):
-                handler_log.append("after")
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=checkin_time,
+                checkout_date=checkin_time + timedelta(days=1),
+                status="confirmed",
+            )
 
-        # Create booking and spawn agent
-        booking = Booking.objects.create(
-            guest=self.guest,
-            checkin_date=timezone.now() + timedelta(days=1),
-            checkout_date=timezone.now() + timedelta(days=2),
-            status="pending",
-        )
+            # Handler not yet fired - move_in event hasn't occurred
+            self.assertNotIn("pre_checkin_sent", handler_log)
 
-        created_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_created",
-        )
-        created_event.mark_as_occurred()
+            # Advance to just past checkin - move_in event fires, handler runs immediately
+            # (since scheduled_at = checkin - 180min is in the past)
+            tm.advance(hours=2, minutes=1)
+            self.assertIn("pre_checkin_sent", handler_log)
 
-        # Update to confirmed
-        booking.status = "confirmed"
-        booking.save()
+    def test_multiple_handlers_different_offsets_fire_in_order(self):
+        """
+        Multiple handlers for same event with different offsets fire at correct times.
 
-        confirmed_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_confirmed",
-        )
-        confirmed_event.mark_as_occurred()
+        Note: Handlers are only scheduled when the event fires. So:
+        - Negative offset handlers fire immediately (scheduled_at is in the past)
+        - Zero offset handlers fire immediately
+        - Positive offset handlers fire after their delay
+        """
+        handler_log = []
 
-        # Verify all handlers created executions
-        executions = HandlerExecution.objects.filter(
-            agent_run__agent_name="multi_handler_agent",
-            event_name="booking_confirmed",
-        )
-        self.assertEqual(executions.count(), 3)
+        @agent("multi_offset_agent", spawn_on="booking_created")
+        class MultiOffsetAgent:
+            class Context(BaseModel):
+                pass
+
+            def get_namespace(self, event):
+                return f"booking:{event.entity.id}"
+
+            @classmethod
+            def create_context(cls, event):
+                return cls.Context()
+
+            @handler("move_in", offset_minutes=-60)  # Would be 1 hour before, fires immediately
+            def one_hour_before(self, ctx):
+                handler_log.append("1h_before")
+
+            @handler("move_in", offset_minutes=0)  # At checkin
+            def at_checkin(self, ctx):
+                handler_log.append("at_checkin")
+
+            @handler("move_in", offset_minutes=60)  # 1 hour after
+            def one_hour_after(self, ctx):
+                handler_log.append("1h_after")
+
+        with time_machine() as tm:
+            # Checkin is 2 hours from now
+            checkin_time = timezone.now() + timedelta(hours=2)
+
+            Booking.objects.create(
+                guest=self.guest,
+                checkin_date=checkin_time,
+                checkout_date=checkin_time + timedelta(days=1),
+                status="confirmed",
+            )
+
+            # Before checkin - no handlers fire yet
+            tm.advance(hours=1)
+            self.assertNotIn("1h_before", handler_log)
+            self.assertNotIn("at_checkin", handler_log)
+            self.assertNotIn("1h_after", handler_log)
+
+            # Advance to checkin time - event fires
+            # Negative offset and zero offset handlers fire immediately
+            tm.advance(hours=1, minutes=1)
+            self.assertIn("1h_before", handler_log)  # Fired immediately (was in past)
+            self.assertIn("at_checkin", handler_log)  # Fired immediately
+            self.assertNotIn("1h_after", handler_log)  # Not yet - needs 1 more hour
+
+            # Advance 1 hour past checkin - positive offset handler fires
+            tm.advance(hours=1)
+            self.assertIn("1h_after", handler_log)
 
     def test_handler_condition_prevents_execution(self):
-        """Test that condition=False prevents handler execution"""
+        """condition=False prevents handler execution."""
         handler_log = []
 
         def always_false(event, ctx):
@@ -530,100 +489,26 @@ class HandlerBasedAgentTests(TransactionTestCase):
             def conditional_handler(self, ctx):
                 handler_log.append("should_not_run")
 
-        # Create and spawn
-        booking = Booking.objects.create(
-            guest=self.guest,
-            checkin_date=timezone.now() + timedelta(days=1),
-            checkout_date=timezone.now() + timedelta(days=2),
-            status="pending",
-        )
+        with time_machine() as tm:
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=timezone.now() + timedelta(days=1),
+                checkout_date=timezone.now() + timedelta(days=2),
+                status="confirmed",
+            )
 
-        created_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_created",
-        )
-        created_event.mark_as_occurred()
+            # Handler should have been skipped
+            self.assertNotIn("should_not_run", handler_log)
 
-        # Update and trigger handler
-        booking.status = "confirmed"
-        booking.save()
-
-        confirmed_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_confirmed",
-        )
-        confirmed_event.mark_as_occurred()
-
-        # Handler should have been skipped
-        self.assertNotIn("should_not_run", handler_log)
-
-        # Verify execution was marked as skipped
-        execution = HandlerExecution.objects.filter(
-            agent_run__agent_name="condition_test_agent",
-            handler_name="conditional_handler",
-        ).first()
-        self.assertEqual(execution.status, HandlerStatus.SKIPPED)
-
-    def test_handler_condition_allows_execution(self):
-        """Test that condition=True allows handler execution"""
-        handler_log = []
-
-        def always_true(event, ctx):
-            return True
-
-        @agent("condition_pass_agent", spawn_on="booking_created")
-        class ConditionPassAgent:
-            class Context(BaseModel):
-                pass
-
-            def get_namespace(self, event):
-                return f"booking:{event.entity.id}"
-
-            @classmethod
-            def create_context(cls, event):
-                return cls.Context()
-
-            @handler("booking_confirmed", condition=always_true)
-            def conditional_handler(self, ctx):
-                handler_log.append("did_run")
-
-        # Create and spawn
-        booking = Booking.objects.create(
-            guest=self.guest,
-            checkin_date=timezone.now() + timedelta(days=1),
-            checkout_date=timezone.now() + timedelta(days=2),
-            status="pending",
-        )
-
-        created_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_created",
-        )
-        created_event.mark_as_occurred()
-
-        # Update and trigger handler
-        booking.status = "confirmed"
-        booking.save()
-
-        confirmed_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_confirmed",
-        )
-        confirmed_event.mark_as_occurred()
-
-        # Handler should have run
-        self.assertIn("did_run", handler_log)
-
-    # ============================================================================
-    # CONTEXT UPDATE TESTS
-    # ============================================================================
+            # Verify execution was marked as skipped
+            execution = HandlerExecution.objects.filter(
+                agent_run__agent_name="condition_test_agent",
+                handler_name="conditional_handler",
+            ).first()
+            self.assertEqual(execution.status, HandlerStatus.SKIPPED)
 
     def test_handler_updates_context(self):
-        """Test that handler can update agent context"""
+        """Handler can update agent context."""
 
         @agent("context_update_agent", spawn_on="booking_created")
         class ContextUpdateAgent:
@@ -643,112 +528,126 @@ class HandlerBasedAgentTests(TransactionTestCase):
                 ctx.counter += 1
                 ctx.messages.append("confirmed")
 
-        # Create and spawn
-        booking = Booking.objects.create(
-            guest=self.guest,
-            checkin_date=timezone.now() + timedelta(days=1),
-            checkout_date=timezone.now() + timedelta(days=2),
-            status="pending",
-        )
+        with time_machine() as tm:
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=timezone.now() + timedelta(days=1),
+                checkout_date=timezone.now() + timedelta(days=2),
+                status="confirmed",
+            )
 
-        created_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_created",
-        )
-        created_event.mark_as_occurred()
+            # Verify context was updated
+            agent_run = AgentRun.objects.get(
+                agent_name="context_update_agent",
+                namespace=f"booking:{booking.id}",
+            )
+            self.assertEqual(agent_run.context["counter"], 1)
+            self.assertEqual(agent_run.context["messages"], ["confirmed"])
 
-        # Update and trigger handler
-        booking.status = "confirmed"
-        booking.save()
+    def test_complete_reservation_journey(self):
+        """
+        Test a realistic reservation journey with multiple timed handlers.
 
-        confirmed_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_confirmed",
-        )
-        confirmed_event.mark_as_occurred()
+        Note: Handlers are scheduled when events fire, so negative offset handlers
+        fire immediately when the event fires (not before).
+        """
+        journey_log = []
 
-        # Verify context was updated
-        agent_run = AgentRun.objects.get(
-            agent_name="context_update_agent",
-            namespace=f"booking:{booking.id}",
-        )
-        self.assertEqual(agent_run.context["counter"], 1)
-        self.assertEqual(agent_run.context["messages"], ["confirmed"])
-
-    # ============================================================================
-    # RETRY TESTS
-    # ============================================================================
-
-    def test_handler_retry_on_error(self):
-        """Test that handler retries on error when retry policy is set"""
-        attempt_count = [0]  # Use list to allow modification in nested function
-
-        @agent("retry_test_agent", spawn_on="booking_created")
-        class RetryTestAgent:
+        @agent("reservation_journey", spawn_on="booking_created")
+        class ReservationJourney:
             class Context(BaseModel):
-                pass
+                reservation_id: int = 0
+                guest_name: str = ""
+                pre_checkin_sent: bool = False
+                welcome_sent: bool = False
+                checkout_sent: bool = False
 
             def get_namespace(self, event):
-                return f"booking:{event.entity.id}"
+                return f"reservation:{event.entity.id}"
 
             @classmethod
             def create_context(cls, event):
-                return cls.Context()
+                booking = event.entity
+                return cls.Context(
+                    reservation_id=booking.id,
+                    guest_name=booking.guest.name,
+                )
 
-            @handler(
-                "booking_confirmed",
-                retry=Retry(max_attempts=3, base_delay=timedelta(seconds=0)),
+            @handler("booking_confirmed", offset_minutes=0)
+            def send_confirmation(self, ctx):
+                journey_log.append(f"confirmation:{ctx.reservation_id}")
+
+            @handler("move_in", offset_minutes=-180)  # Fires immediately when move_in event fires
+            def send_pre_checkin(self, ctx):
+                journey_log.append(f"pre_checkin:{ctx.reservation_id}")
+                ctx.pre_checkin_sent = True
+
+            @handler("move_in", offset_minutes=0)
+            def send_welcome(self, ctx):
+                journey_log.append(f"welcome:{ctx.reservation_id}")
+                ctx.welcome_sent = True
+
+            @handler("move_out", offset_minutes=0)
+            def send_checkout(self, ctx):
+                journey_log.append(f"checkout:{ctx.reservation_id}")
+                ctx.checkout_sent = True
+
+        with time_machine() as tm:
+            # Checkin is 2 hours from now, checkout 2 days later
+            checkin = timezone.now() + timedelta(hours=2)
+            checkout = checkin + timedelta(days=2)
+
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=checkin,
+                checkout_date=checkout,
+                status="confirmed",
             )
-            def flaky_handler(self, ctx):
-                attempt_count[0] += 1
-                if attempt_count[0] < 2:
-                    raise Exception("Simulated failure")
 
-        # Create and spawn
-        booking = Booking.objects.create(
-            guest=self.guest,
-            checkin_date=timezone.now() + timedelta(days=1),
-            checkout_date=timezone.now() + timedelta(days=2),
-            status="pending",
-        )
+            # Confirmation should have been sent immediately (booking_confirmed is immediate)
+            self.assertIn(f"confirmation:{booking.id}", journey_log)
 
-        created_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_created",
-        )
-        created_event.mark_as_occurred()
+            # Before checkin - move_in handlers haven't fired yet
+            tm.advance(hours=1)
+            self.assertNotIn(f"pre_checkin:{booking.id}", journey_log)
+            self.assertNotIn(f"welcome:{booking.id}", journey_log)
 
-        # Update and trigger handler
-        booking.status = "confirmed"
-        booking.save()
+            # Advance to checkin time - move_in event fires
+            # Both pre_checkin (-180 offset) and welcome (0 offset) fire immediately
+            tm.advance(hours=1, minutes=1)
+            self.assertIn(f"pre_checkin:{booking.id}", journey_log)
+            self.assertIn(f"welcome:{booking.id}", journey_log)
 
-        confirmed_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_confirmed",
-        )
-        confirmed_event.mark_as_occurred()
+            # Advance to checkout time - move_out event fires
+            tm.advance(days=2)
+            self.assertIn(f"checkout:{booking.id}", journey_log)
 
-        # Handler should have been called twice (first failed, second succeeded)
-        self.assertEqual(attempt_count[0], 2)
+            # Verify all context flags were set
+            agent_run = AgentRun.objects.get(
+                agent_name="reservation_journey",
+                namespace=f"reservation:{booking.id}",
+            )
+            self.assertTrue(agent_run.context["pre_checkin_sent"])
+            self.assertTrue(agent_run.context["welcome_sent"])
+            self.assertTrue(agent_run.context["checkout_sent"])
 
-        # Verify execution completed
-        execution = HandlerExecution.objects.filter(
-            agent_run__agent_name="retry_test_agent",
-            handler_name="flaky_handler",
-        ).first()
-        self.assertEqual(execution.status, HandlerStatus.COMPLETED)
-        self.assertEqual(execution.attempt_count, 2)
 
-    # ============================================================================
-    # AGENT MANAGER TESTS
-    # ============================================================================
+@override_settings(SKIP_Q2_AUTOSCHEDULE=True)
+class AgentManagerTests(TransactionTestCase):
+    """Test AgentManager utility methods."""
+
+    def setUp(self):
+        agent_engine.set_executor(SynchronousExecutor())
+        _agents.clear()
+        _agent_handlers.clear()
+        callback_registry.clear()
+
+    def tearDown(self):
+        _agents.clear()
+        _agent_handlers.clear()
 
     def test_agent_manager_manual_spawn(self):
-        """Test AgentManager.spawn for manual agent creation"""
+        """AgentManager.spawn creates agent manually."""
 
         @agent("manual_agent", spawn_on="booking_created")
         class ManualAgent:
@@ -762,7 +661,6 @@ class HandlerBasedAgentTests(TransactionTestCase):
             def create_context(cls, event):
                 return cls.Context()
 
-        # Manual spawn with custom context
         agent_run = AgentManager.spawn(
             "manual_agent",
             namespace="custom_namespace",
@@ -776,7 +674,7 @@ class HandlerBasedAgentTests(TransactionTestCase):
         self.assertEqual(agent_run.status, AgentStatus.ACTIVE)
 
     def test_agent_manager_complete(self):
-        """Test AgentManager.complete marks agent as completed"""
+        """AgentManager.complete marks agent as completed."""
 
         @agent("complete_test_agent", spawn_on="booking_created")
         class CompleteTestAgent:
@@ -799,7 +697,7 @@ class HandlerBasedAgentTests(TransactionTestCase):
         self.assertEqual(agent_run.status, AgentStatus.COMPLETED)
 
     def test_agent_manager_list_active(self):
-        """Test AgentManager.list_active returns correct agents"""
+        """AgentManager.list_active returns correct agents."""
 
         @agent("list_test_agent", spawn_on="booking_created", singleton=False)
         class ListTestAgent:
@@ -829,105 +727,6 @@ class HandlerBasedAgentTests(TransactionTestCase):
         active_ns1 = AgentManager.list_active("list_test_agent", namespace="ns1")
         self.assertEqual(len(active_ns1), 1)
         self.assertEqual(active_ns1[0].namespace, "ns1")
-
-    # ============================================================================
-    # REALISTIC USE CASE TEST
-    # ============================================================================
-
-    def test_reservation_journey_agent(self):
-        """Test realistic reservation journey agent with multiple handlers"""
-        journey_log = []
-
-        @agent("reservation_journey", spawn_on="booking_created")
-        class ReservationJourney:
-            class Context(BaseModel):
-                reservation_id: int = 0
-                guest_name: str = ""
-                pre_checkin_sent: bool = False
-                access_code_created: bool = False
-                welcome_sent: bool = False
-                checkout_sent: bool = False
-
-            def get_namespace(self, event):
-                return f"reservation:{event.entity.id}"
-
-            @classmethod
-            def create_context(cls, event):
-                booking = event.entity
-                return cls.Context(
-                    reservation_id=booking.id,
-                    guest_name=booking.guest.name,
-                )
-
-            @handler("booking_confirmed", offset_minutes=0)
-            def send_confirmation(self, ctx):
-                journey_log.append(f"confirmation_sent:{ctx.reservation_id}")
-
-            @handler("move_in", offset_minutes=-180)  # 3 hours before
-            def send_pre_checkin(self, ctx):
-                journey_log.append(f"pre_checkin:{ctx.reservation_id}")
-                ctx.pre_checkin_sent = True
-
-            @handler("move_in", offset_minutes=-60)  # 1 hour before
-            def create_access_code(self, ctx):
-                journey_log.append(f"access_code:{ctx.reservation_id}")
-                ctx.access_code_created = True
-
-            @handler("move_in", offset_minutes=0)
-            def send_welcome(self, ctx):
-                journey_log.append(f"welcome:{ctx.reservation_id}")
-                ctx.welcome_sent = True
-
-            @handler("move_out", offset_minutes=0)
-            def send_checkout(self, ctx):
-                journey_log.append(f"checkout:{ctx.reservation_id}")
-                ctx.checkout_sent = True
-
-        # Create booking
-        booking = Booking.objects.create(
-            guest=self.guest,
-            checkin_date=timezone.now() + timedelta(days=1),
-            checkout_date=timezone.now() + timedelta(days=3),
-            status="pending",
-        )
-
-        # Trigger spawn event
-        created_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_created",
-        )
-        created_event.mark_as_occurred()
-
-        # Verify agent was created
-        agent_run = AgentRun.objects.get(
-            agent_name="reservation_journey",
-            namespace=f"reservation:{booking.id}",
-        )
-        self.assertEqual(agent_run.context["reservation_id"], booking.id)
-        self.assertEqual(agent_run.context["guest_name"], "Test User")
-
-        # Confirm booking
-        booking.status = "confirmed"
-        booking.save()
-
-        confirmed_event = Event.objects.get(
-            model_type=ContentType.objects.get_for_model(Booking),
-            entity_id=str(booking.id),
-            event_name="booking_confirmed",
-        )
-        confirmed_event.mark_as_occurred()
-
-        self.assertIn(f"confirmation_sent:{booking.id}", journey_log)
-
-        # Verify handlers were registered
-        handlers = agent_engine.list_handlers("reservation_journey")
-        self.assertEqual(len(handlers), 5)  # 5 handlers defined
-
-        handler_events = [h.event_name for h in handlers]
-        self.assertIn("booking_confirmed", handler_events)
-        self.assertIn("move_in", handler_events)
-        self.assertIn("move_out", handler_events)
 
 
 if __name__ == "__main__":

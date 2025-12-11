@@ -31,5 +31,9 @@ class SynchronousExecutor:
             message_id = args[0]
             from django_ai.conversations.tasks import process_conversation_message
             process_conversation_message(message_id)
+        elif task_name == "execute_handler":
+            execution_id = args[0]
+            from django_ai.automation.agents.core import agent_engine
+            agent_engine.execute_handler(execution_id)
         else:
             raise ValueError(f"Unsupported task {task_name} in SynchronousExecutor")

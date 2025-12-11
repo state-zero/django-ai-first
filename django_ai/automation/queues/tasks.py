@@ -27,3 +27,8 @@ def poll_due_events(hours: int = 24) -> dict:
 
 def cleanup_old_events(days: int = 30) -> dict:
     return event_processor.cleanup_old_events(days_old=days)
+
+
+def execute_handler(execution_id: int) -> None:
+    from ..agents.core import agent_engine
+    agent_engine.execute_handler(execution_id)

@@ -50,6 +50,7 @@ class ProcessingStats:
     events_processed: int = 0
     workflows_woken: int = 0
     steps_executed: int = 0
+    handlers_executed: int = 0
 
 
 @dataclass
@@ -151,7 +152,7 @@ class TimeMachine:
 
     def process(self) -> ProcessingStats:
         """
-        Process all due events and wake sleeping workflows.
+        Process all due events, wake sleeping workflows, and execute scheduled handlers.
 
         This is called automatically when time advances if auto_process=True.
         Call manually if auto_process=False.
@@ -162,6 +163,8 @@ class TimeMachine:
         from django_ai.automation.events.services import event_processor
         from django_ai.automation.workflows.core import engine
         from django_ai.automation.workflows.models import WorkflowRun, WorkflowStatus
+        from django_ai.automation.agents.core import agent_engine
+        from django_ai.automation.agents.models import HandlerExecution, HandlerStatus
         from django.db.models import Q
 
         stats = ProcessingStats()
@@ -188,6 +191,16 @@ class TimeMachine:
         stats.workflows_woken = ready_count
         self.stats.workflows_woken += stats.workflows_woken
 
+        # Process scheduled agent handlers
+        ready_handlers = HandlerExecution.objects.filter(
+            status=HandlerStatus.PENDING,
+            scheduled_at__lte=now,
+        ).count()
+
+        agent_engine.process_scheduled_handlers()
+        stats.handlers_executed = ready_handlers
+        self.stats.handlers_executed += stats.handlers_executed
+
         return stats
 
     def run_until_idle(self, max_iterations: int = 100) -> ProcessingStats:
@@ -208,8 +221,10 @@ class TimeMachine:
             stats = self.process()
             total_stats.events_processed += stats.events_processed
             total_stats.workflows_woken += stats.workflows_woken
+            total_stats.handlers_executed += stats.handlers_executed
 
-            if stats.events_processed == 0 and stats.workflows_woken == 0:
+            if (stats.events_processed == 0 and stats.workflows_woken == 0
+                    and stats.handlers_executed == 0):
                 break
 
         return total_stats

@@ -140,6 +140,17 @@ class Booking(models.Model):
             date_field="checkout_date",
             condition=lambda b: b.status == "confirmed",
         ),
+        # Agent-friendly aliases
+        EventDefinition(
+            "move_in",
+            date_field="checkin_date",
+            condition=lambda b: b.status == "confirmed",
+        ),
+        EventDefinition(
+            "move_out",
+            date_field="checkout_date",
+            condition=lambda b: b.status == "confirmed",
+        ),
     ]
 
     def __str__(self):
