@@ -35,13 +35,15 @@ class ConversationService:
     def send_message(cls, session_id, message, user=None, request=None, files=None):
         """Process message with clean context separation (sync only)."""
         from .models import ConversationSession, ConversationMessage
-        from .context import _current_session, _current_request, _auto_save_context
+        from .context import _current_session, _current_request, _current_agent_context, _auto_save_context
 
         session = ConversationSession.objects.get(id=session_id)
 
         # Set context vars (remember tokens so we can restore them)
         sess_token = _current_session.set(session)
         req_token  = _current_request.set(request)
+        # Reset agent context so it gets re-created for this session
+        ctx_token = _current_agent_context.set(None)
 
         try:
             # Create agent instance
@@ -81,3 +83,4 @@ class ConversationService:
             # Restore original context values
             _current_session.reset(sess_token)
             _current_request.reset(req_token)
+            _current_agent_context.reset(ctx_token)

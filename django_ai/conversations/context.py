@@ -92,7 +92,7 @@ def display_widget(widget_type, data, display_data=None):
         session=session,
         widget_type=widget_type,
         widget_data=data,
-        display_data=display_data
+        display_data=display_data or {}
     )
     widget.refresh_from_db()
 
