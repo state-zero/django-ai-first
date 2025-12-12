@@ -706,5 +706,107 @@ class AgentManagerTests(TransactionTestCase):
         self.assertEqual(active_ns1[0].namespace, "ns1")
 
 
+@override_settings(SKIP_Q2_AUTOSCHEDULE=True)
+class HandlerOnSpawnEventTests(TransactionTestCase):
+    """Test that handlers registered on the spawn event execute correctly."""
+
+    def setUp(self):
+        engine.set_executor(SynchronousExecutor())
+        agent_engine.set_executor(SynchronousExecutor())
+        _agents.clear()
+        _agent_handlers.clear()
+        callback_registry.clear()
+
+        from django_ai.automation.workflows.integration import handle_event_for_workflows
+
+        callback_registry.register(
+            handle_event_for_workflows, event_name="*", namespace="*"
+        )
+
+        self.guest = Guest.objects.create(email="spawn@example.com", name="Spawn Test")
+
+    def tearDown(self):
+        callback_registry.clear()
+        _agents.clear()
+        _agent_handlers.clear()
+
+    def test_handler_on_spawn_event_executes(self):
+        """Handler listening to the same event as spawn_on should execute when agent spawns.
+
+        This is the bug from handler_on_spawn_event.md:
+        When an agent has @handler("event_name") where event_name == spawn_on,
+        the handler should execute immediately when the agent spawns.
+        """
+        handler_log = []
+
+        @agent("guest_journey", spawn_on="booking_created")
+        class GuestJourneyAgent:
+            class Context(BaseModel):
+                booking_id: int = 0
+                access_code_set: bool = False
+
+            def get_namespace(self, event):
+                return f"booking:{event.entity.id}"
+
+            @classmethod
+            def create_context(cls, event):
+                return cls.Context(booking_id=event.entity.id)
+
+            @handler("booking_created")  # Same event as spawn_on
+            def create_guest_access_code(self, ctx):
+                """This handler should execute when agent spawns."""
+                handler_log.append("access_code_created")
+                ctx.access_code_set = True
+
+            @handler("booking_confirmed")  # Different event
+            def send_confirmation(self, ctx):
+                handler_log.append("confirmation_sent")
+
+        with time_machine() as tm:
+            # Create booking - fires booking_created event
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=timezone.now() + timedelta(days=1),
+                checkout_date=timezone.now() + timedelta(days=2),
+                status="pending",
+            )
+
+            # Agent should have been created
+            agent_run = AgentRun.objects.filter(
+                agent_name="guest_journey",
+                namespace=f"booking:{booking.id}",
+            ).first()
+            self.assertIsNotNone(agent_run, "Agent should have been spawned")
+
+            # The handler for booking_created should have executed
+            self.assertIn(
+                "access_code_created",
+                handler_log,
+                "Handler on spawn event should have executed",
+            )
+
+            # HandlerExecution record should exist and be completed
+            execution = HandlerExecution.objects.filter(
+                agent_run=agent_run,
+                handler_name="create_guest_access_code",
+            ).first()
+            self.assertIsNotNone(
+                execution,
+                "HandlerExecution record should exist for spawn event handler",
+            )
+            self.assertEqual(
+                execution.status,
+                HandlerStatus.COMPLETED,
+                "Handler should have completed successfully",
+            )
+
+            # Context should have been updated
+            agent_run.refresh_from_db()
+            self.assertTrue(
+                agent_run.context["access_code_set"],
+                "Handler should have updated context",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

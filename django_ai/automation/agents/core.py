@@ -196,7 +196,7 @@ def _register_spawn_handler(
         # Create new agent run
         context = agent_class.create_context(event)
 
-        AgentRun.objects.create(
+        agent_run = AgentRun.objects.create(
             agent_name=agent_name,
             namespace=namespace,
             entity_type_id=event.model_type_id,
@@ -204,6 +204,18 @@ def _register_spawn_handler(
             context=context.model_dump(),
             status=AgentStatus.ACTIVE,
         )
+
+        # Schedule handlers that listen to the spawn event
+        # These handlers missed the on_event_created callback since the agent
+        # didn't exist yet when the event was created
+        for handler_info in agent_class._handlers:
+            if handler_info.event_name == event_name:
+                agent_engine.schedule_handler(
+                    agent_name=agent_name,
+                    handler_name=handler_info.method_name,
+                    event=event,
+                    offset_minutes=handler_info.offset_minutes,
+                )
 
 
 def _register_event_handler(
