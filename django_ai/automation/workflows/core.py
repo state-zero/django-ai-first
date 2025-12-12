@@ -1,10 +1,11 @@
 import logging
 import traceback
 from datetime import timedelta
-from typing import Dict, Any, Optional, Callable, TypeVar, Generic
+from typing import Dict, Any, Optional, Callable, TypeVar, Generic, Union
 from django.conf import settings
 
 from pydantic import BaseModel
+from dateutil.relativedelta import relativedelta
 
 T = TypeVar("T", bound=BaseModel)
 from dataclasses import dataclass
@@ -15,6 +16,9 @@ from django.db.models import Q
 from .models import WorkflowRun, WorkflowStatus, StepExecution, StepType
 from django.utils import timezone
 from ...utils.json import safe_model_dump
+
+# Type alias for offset - accepts both timedelta and relativedelta
+OffsetType = Union[timedelta, relativedelta]
 
 logger = logging.getLogger(__name__)
 
@@ -303,7 +307,7 @@ def workflow(name: str, version: str = "1", default_retry: Optional[Retry] = Non
 
 def event_workflow(
     event_name: str,
-    offset: timedelta = None,
+    offset: OffsetType = None,
     version: str = "1",
     default_retry: Optional[Retry] = None,
 ):
@@ -313,7 +317,11 @@ def event_workflow(
 
     Args:
         event_name: Name of the event that triggers this workflow
-        offset: Offset from event time as timedelta. Negative = before, positive = after.
+        offset: Offset from event time. Accepts timedelta or relativedelta.
+               Negative = before, positive = after.
+               Examples:
+                 - timedelta(hours=-1): fires 1 hour BEFORE event time
+                 - relativedelta(months=-1): fires 1 month BEFORE event time
         version: Workflow version string
         default_retry: Default retry policy for steps
     """

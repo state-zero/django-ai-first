@@ -1,11 +1,18 @@
-from typing import Callable, Dict, List, Any, Protocol
+from typing import Callable, Dict, List, Any, Protocol, Union
 from dataclasses import dataclass, field
 from datetime import timedelta
 import uuid
 from enum import Enum
 import logging
 
+from dateutil.relativedelta import relativedelta
+
 logger = logging.getLogger(__name__)
+
+# Type alias for offset - accepts both timedelta and relativedelta
+# timedelta: fixed durations (hours, minutes, seconds)
+# relativedelta: calendar-aware durations (months, years, weekdays)
+OffsetType = Union[timedelta, relativedelta]
 
 
 class EventPhase(Enum):
@@ -32,7 +39,7 @@ class CallbackRegistration:
     event_name: str = "*"  # Specific event name or "*" for all
     phase: EventPhase = EventPhase.OCCURRED
     namespace: str = "*"  # Specific event namespace or "*" for all
-    offset: timedelta = field(default_factory=timedelta)  # Offset from event time
+    offset: OffsetType = field(default_factory=timedelta)  # Offset from event time
     _id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
@@ -49,7 +56,7 @@ class EventCallbackRegistry:
         event_name: str = "*",
         namespace: str = "*",
         phase: EventPhase = EventPhase.OCCURRED,
-        offset: timedelta = None,
+        offset: OffsetType = None,
     ) -> None:
         """Register a callback for events"""
         callback_id: int = id(callback)
@@ -71,7 +78,7 @@ class EventCallbackRegistry:
         return False
 
     def notify(
-        self, event: "Event", phase: EventPhase, offset: timedelta = None
+        self, event: "Event", phase: EventPhase, offset: OffsetType = None
     ) -> None:
         """Notify all matching callbacks about an event
 
@@ -151,7 +158,7 @@ def on_event_base(
     event_name: str = "*",
     namespace: str = "*",
     phase: EventPhase = EventPhase.OCCURRED,
-    offset: timedelta = None,
+    offset: OffsetType = None,
 ):
     """Base decorator to register event callbacks"""
 
@@ -166,15 +173,17 @@ def on_event_created(event_name: str = "*", namespace: str = "*"):
     return on_event_base(event_name, namespace, EventPhase.CREATED)
 
 
-def on_event(event_name: str = "*", namespace: str = "*", offset: timedelta = None):
+def on_event(event_name: str = "*", namespace: str = "*", offset: OffsetType = None):
     """Decorator for when events occur (default behavior)
 
     Args:
         event_name: Event name to listen for, or "*" for all
         namespace: Namespace to filter by, or "*" for all
-        offset: Offset from event.at time as a timedelta.
+        offset: Offset from event.at time. Accepts timedelta or relativedelta.
                Negative = before, positive = after.
-               E.g., timedelta(hours=-1) fires 1 hour BEFORE the event time.
+               Examples:
+                 - timedelta(hours=-1): fires 1 hour BEFORE event time
+                 - relativedelta(months=-1): fires 1 month BEFORE event time
     """
     return on_event_base(event_name, namespace, EventPhase.OCCURRED, offset)
 

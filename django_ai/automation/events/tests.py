@@ -3,6 +3,7 @@ from django.utils import timezone
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection
 from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
 from ..events.models import Event, EventStatus
 from ..events.definitions import EventDefinition
 from tests.models import TestBooking, TestOrder, TestProperty, TestModelWithoutEvents, TestUUIDModel
@@ -926,3 +927,258 @@ class EventOffsetCallbackTest(TransactionTestCase):
                 "at_checkin": 1,
                 "1h_after": 1,
             })
+
+    def test_relativedelta_offset_works(self):
+        """Callbacks with relativedelta offsets should work correctly.
+
+        This test verifies that relativedelta can be used as an offset type,
+        which is useful for calendar-aware durations like 'months' or 'years'.
+        """
+        from django_ai.automation.events.callbacks import callback_registry, on_event
+        from django_ai.automation.testing import time_machine
+
+        callback_log = []
+
+        # Use relativedelta for calendar-aware offset (7 days before, using weeks)
+        @on_event(event_name="checkin_due", offset=relativedelta(weeks=-1))
+        def one_week_before(event):
+            callback_log.append("1_week_before")
+
+        @on_event(event_name="checkin_due")
+        def at_checkin(event):
+            callback_log.append("at_checkin")
+
+        with time_machine() as tm:
+            now = timezone.now()
+            # Checkin is 2 weeks from now
+            checkin_time = now + timedelta(weeks=2)
+
+            TestBooking.objects.create(
+                guest_name="RelativeDelta Test",
+                checkin_date=checkin_time,
+                checkout_date=checkin_time + timedelta(days=1),
+                status="confirmed",
+            )
+
+            # Advance to 1 week before checkin (should trigger 1_week_before)
+            # relativedelta(weeks=-1) means fire 7 days before event.at
+            tm.advance(days=8)  # 1 week + 1 day = 8 days
+            self.assertIn("1_week_before", callback_log)
+            self.assertNotIn("at_checkin", callback_log)
+
+            # Advance to checkin time
+            tm.advance(days=7)  # Another week
+            self.assertIn("at_checkin", callback_log)
+
+    def test_comprehensive_offset_timing_with_event_changes(self):
+        """
+        Comprehensive test of offset timing with scheduled events.
+
+        Tests:
+        - Multiple offsets (before, at, after) fire at correct times
+        - Callbacks don't fire before their scheduled time
+        - Changing event times doesn't re-fire already-processed offsets
+        - New events with same offsets work independently
+        """
+        from django_ai.automation.events.callbacks import callback_registry, on_event
+        from django_ai.automation.events.models import ProcessedEventOffset
+        from django_ai.automation.testing import time_machine
+
+        # Track callback invocations with timestamps
+        callback_log = []
+
+        @on_event(event_name="checkin_due", offset=timedelta(hours=-2))
+        def two_hours_before(event):
+            callback_log.append(("2h_before", event.entity_id, timezone.now()))
+
+        @on_event(event_name="checkin_due", offset=timedelta(hours=-1))
+        def one_hour_before(event):
+            callback_log.append(("1h_before", event.entity_id, timezone.now()))
+
+        @on_event(event_name="checkin_due")
+        def at_checkin(event):
+            callback_log.append(("at_checkin", event.entity_id, timezone.now()))
+
+        @on_event(event_name="checkin_due", offset=timedelta(minutes=30))
+        def thirty_min_after(event):
+            callback_log.append(("30m_after", event.entity_id, timezone.now()))
+
+        @on_event(event_name="checkin_due", offset=timedelta(hours=1))
+        def one_hour_after(event):
+            callback_log.append(("1h_after", event.entity_id, timezone.now()))
+
+        with time_machine() as tm:
+            start_time = timezone.now()
+
+            # Create a booking with checkin 4 hours from now
+            checkin_time = start_time + timedelta(hours=4)
+            booking = TestBooking.objects.create(
+                guest_name="Timing Test",
+                checkin_date=checkin_time,
+                checkout_date=checkin_time + timedelta(days=1),
+                status="confirmed",
+            )
+            booking_id = str(booking.id)
+
+            # === Test 1: Nothing should fire yet (we're 4 hours before checkin) ===
+            self.assertEqual(len(callback_log), 0, "No callbacks should fire yet")
+
+            # === Test 2: Advance to 2h before checkin - only 2h_before should fire ===
+            tm.advance(hours=2, minutes=1)  # Now 1h59m before checkin
+
+            callbacks_fired = [c[0] for c in callback_log if c[1] == booking_id]
+            self.assertEqual(callbacks_fired, ["2h_before"],
+                f"Only 2h_before should fire. Got: {callbacks_fired}")
+
+            # === Test 3: Advance to 1h before - 1h_before should fire ===
+            tm.advance(hours=1)  # Now 59m before checkin
+
+            callbacks_fired = [c[0] for c in callback_log if c[1] == booking_id]
+            self.assertEqual(callbacks_fired, ["2h_before", "1h_before"],
+                f"2h_before and 1h_before should have fired. Got: {callbacks_fired}")
+
+            # === Test 4: Advance to checkin time - at_checkin should fire ===
+            tm.advance(hours=1)  # Now at checkin time
+
+            callbacks_fired = [c[0] for c in callback_log if c[1] == booking_id]
+            self.assertEqual(callbacks_fired, ["2h_before", "1h_before", "at_checkin"],
+                f"at_checkin should have fired. Got: {callbacks_fired}")
+
+            # === Test 5: Advance 30 min after - 30m_after should fire ===
+            tm.advance(minutes=31)
+
+            callbacks_fired = [c[0] for c in callback_log if c[1] == booking_id]
+            self.assertIn("30m_after", callbacks_fired,
+                f"30m_after should have fired. Got: {callbacks_fired}")
+
+            # === Test 6: Advance 1 hour after - 1h_after should fire ===
+            tm.advance(minutes=30)  # Now 1h1m after checkin
+
+            callbacks_fired = [c[0] for c in callback_log if c[1] == booking_id]
+            self.assertEqual(
+                callbacks_fired,
+                ["2h_before", "1h_before", "at_checkin", "30m_after", "1h_after"],
+                f"All callbacks should have fired in order. Got: {callbacks_fired}"
+            )
+
+            # === Test 7: Change the event time - callbacks should NOT re-fire ===
+            # Move checkin to 2 hours later
+            new_checkin = checkin_time + timedelta(hours=2)
+            booking.checkin_date = new_checkin
+            booking.save()
+
+            # Process again - nothing new should fire
+            tm.process()
+            tm.process()
+
+            callbacks_for_booking = [c for c in callback_log if c[1] == booking_id]
+            self.assertEqual(len(callbacks_for_booking), 5,
+                "Changing event time should NOT re-fire callbacks")
+
+            # === Test 8: Create a NEW booking - it should get its own callbacks ===
+            callback_log.clear()  # Clear for clarity
+
+            new_checkin_time = timezone.now() + timedelta(hours=3)
+            booking2 = TestBooking.objects.create(
+                guest_name="Second Booking",
+                checkin_date=new_checkin_time,
+                checkout_date=new_checkin_time + timedelta(days=1),
+                status="confirmed",
+            )
+            booking2_id = str(booking2.id)
+
+            # Advance to 1h before new booking's checkin
+            tm.advance(hours=2, minutes=1)
+
+            callbacks_for_booking2 = [c[0] for c in callback_log if c[1] == booking2_id]
+            self.assertIn("2h_before", callbacks_for_booking2)
+            self.assertIn("1h_before", callbacks_for_booking2)
+
+            # Original booking should have no new callbacks
+            callbacks_for_booking1 = [c[0] for c in callback_log if c[1] == booking_id]
+            self.assertEqual(len(callbacks_for_booking1), 0,
+                "Original booking should not get new callbacks")
+
+            # === Test 9: Verify ProcessedEventOffset records exist ===
+            # This ensures the idempotency tracking is working
+            from django_ai.automation.events.models import Event
+            event1 = Event.objects.get(entity_id=booking_id, event_name="checkin_due")
+            processed_offsets = ProcessedEventOffset.objects.filter(event=event1)
+
+            # Should have 4 offset records (excluding zero offset which uses event status)
+            offset_values = set(p.offset for p in processed_offsets)
+            self.assertIn(timedelta(hours=-2), offset_values)
+            self.assertIn(timedelta(hours=-1), offset_values)
+            self.assertIn(timedelta(minutes=30), offset_values)
+            self.assertIn(timedelta(hours=1), offset_values)
+
+    def test_immediate_event_with_positive_offsets(self):
+        """
+        Test offset callbacks with immediate events.
+
+        Immediate events have event.at = created_at, so:
+        - Negative offsets don't make sense (fire before creation)
+        - Positive offsets fire X time after creation (e.g., follow-up actions)
+        """
+        from django_ai.automation.events.callbacks import callback_registry, on_event
+        from django_ai.automation.events.models import ProcessedEventOffset
+        from django_ai.automation.testing import time_machine
+        from tests.models import TestOrder
+
+        callback_log = []
+
+        @on_event(event_name="order_placed")
+        def on_order_placed(event):
+            callback_log.append(("immediate", event.entity_id, timezone.now()))
+
+        @on_event(event_name="order_placed", offset=timedelta(minutes=30))
+        def thirty_min_followup(event):
+            callback_log.append(("30m_followup", event.entity_id, timezone.now()))
+
+        @on_event(event_name="order_placed", offset=timedelta(hours=1))
+        def one_hour_followup(event):
+            callback_log.append(("1h_followup", event.entity_id, timezone.now()))
+
+        with time_machine() as tm:
+            # Create an order - this is an immediate event
+            order = TestOrder.objects.create(
+                total=500,
+                status="confirmed",
+            )
+            order_id = str(order.id)
+
+            # Immediate callback should fire right away (on next process)
+            callbacks_fired = [c[0] for c in callback_log if c[1] == order_id]
+            self.assertEqual(callbacks_fired, ["immediate"],
+                f"Immediate callback should fire on creation. Got: {callbacks_fired}")
+
+            # === Test: Advance 30 minutes - 30m_followup should fire ===
+            tm.advance(minutes=31)
+
+            callbacks_fired = [c[0] for c in callback_log if c[1] == order_id]
+            self.assertEqual(callbacks_fired, ["immediate", "30m_followup"],
+                f"30m_followup should fire after 30 minutes. Got: {callbacks_fired}")
+
+            # === Test: Advance to 1 hour - 1h_followup should fire ===
+            tm.advance(minutes=30)
+
+            callbacks_fired = [c[0] for c in callback_log if c[1] == order_id]
+            self.assertEqual(callbacks_fired, ["immediate", "30m_followup", "1h_followup"],
+                f"1h_followup should fire after 1 hour. Got: {callbacks_fired}")
+
+            # === Test: Process again - nothing should re-fire ===
+            tm.process()
+            tm.process()
+
+            callbacks_fired = [c[0] for c in callback_log if c[1] == order_id]
+            self.assertEqual(len(callbacks_fired), 3,
+                "Callbacks should not re-fire on repeated processing")
+
+            # === Test: Verify ProcessedEventOffset records ===
+            from django_ai.automation.events.models import Event
+            event = Event.objects.get(entity_id=order_id, event_name="order_placed")
+            processed_offsets = ProcessedEventOffset.objects.filter(event=event)
+
+            offset_values = set(p.offset for p in processed_offsets)
+            self.assertIn(timedelta(minutes=30), offset_values)
+            self.assertIn(timedelta(hours=1), offset_values)

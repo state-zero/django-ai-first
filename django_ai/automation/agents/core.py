@@ -13,7 +13,7 @@ from ..workflows.core import (
 from ..workflows.models import WorkflowRun, WorkflowStatus
 
 from .models import AgentRun, AgentStatus, HandlerExecution, HandlerStatus
-from ..events.callbacks import on_event
+from ..events.callbacks import on_event, OffsetType
 
 
 # Handler metadata stored on decorated methods
@@ -22,7 +22,7 @@ class HandlerInfo:
     """Metadata about a registered handler method"""
     method_name: str
     event_name: str
-    offset: timedelta = field(default_factory=timedelta)
+    offset: OffsetType = field(default_factory=timedelta)
     condition: Optional[Callable] = None
     retry: Optional[Retry] = None
 
@@ -34,7 +34,7 @@ _agent_handlers: Dict[str, List[HandlerInfo]] = {}  # agent_name -> list of hand
 
 def handler(
     event_name: str,
-    offset: timedelta = None,
+    offset: OffsetType = None,
     condition: Optional[Callable[[Any, Any], bool]] = None,
     retry: Optional[Retry] = None,
 ):
@@ -43,12 +43,14 @@ def handler(
 
     Args:
         event_name: Event that triggers this handler
-        offset: Offset from event time as timedelta. Negative = before, positive = after.
+        offset: Offset from event time. Accepts timedelta or relativedelta.
+               Negative = before, positive = after.
         condition: Optional callable(event, ctx) -> bool to conditionally execute handler
         retry: Retry policy for this handler
 
     Example:
         @handler("move_in", offset=timedelta(days=-3))  # 3 days before
+        @handler("move_in", offset=relativedelta(months=-1))  # 1 month before
         def send_pre_checkin_reminder(self, ctx: Context):
             send_message(ctx.guest_name, "Your stay is coming up!")
             ctx.reminder_sent = True
@@ -305,7 +307,7 @@ class AgentEngine:
         agent_name: str,
         handler_name: str,
         event,
-        offset: timedelta = None,
+        offset: OffsetType = None,
     ):
         """
         Schedule a handler for execution, respecting offset timing.
@@ -313,6 +315,8 @@ class AgentEngine:
         For non-zero offset:
             - Negative offset: Schedule before event.at time
             - Positive offset: Schedule after event.at time
+
+        Offset can be timedelta or relativedelta for calendar-aware scheduling.
 
         If the scheduled time is in the past, executes immediately.
         """

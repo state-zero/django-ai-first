@@ -5,9 +5,10 @@ Service layer for processing events - replaces management commands
 from django.utils import timezone
 from django.db import transaction
 from datetime import timedelta
-from typing import List, Set
+from typing import List, Set, Union
+from dateutil.relativedelta import relativedelta
 from .models import Event, EventStatus, ProcessedEventOffset
-from .callbacks import callback_registry, EventPhase
+from .callbacks import callback_registry, EventPhase, OffsetType
 import logging
 
 logger = logging.getLogger(__name__)
@@ -73,11 +74,16 @@ class EventProcessor:
             status_filter = None  # Query all statuses for offset callbacks
 
         # Get events in the adjusted time range
+        # Include immediate events for zero and positive offsets
+        # (positive offsets on immediate events = X time after creation)
+        # Exclude for negative offsets (can't fire before creation)
+        include_immediate = self._is_non_negative_offset(offset)
+
         due_events = Event.objects.get_events(
             from_date=adjusted_since,
             to_date=adjusted_to,
             status=status_filter,
-            include_immediate=(offset == timedelta()),  # Only include immediate for zero offset
+            include_immediate=include_immediate,
         )
 
         processed_count = 0
@@ -138,6 +144,25 @@ class EventProcessor:
             )
 
             return 1
+
+    def _is_non_negative_offset(self, offset: OffsetType) -> bool:
+        """Check if an offset is zero or positive (non-negative).
+
+        Used to determine if immediate events should be included in queries.
+        Immediate events with positive offsets = fire X time after creation.
+        Immediate events with negative offsets don't make sense (fire before creation).
+        """
+        if offset is None:
+            return True
+
+        if isinstance(offset, timedelta):
+            return offset >= timedelta()
+
+        if isinstance(offset, relativedelta):
+            now = timezone.now()
+            return (now + offset) >= now
+
+        return True
 
     def cleanup_old_events(self, days_old: int = 30) -> dict:
         """Remove old completed/cancelled events"""
