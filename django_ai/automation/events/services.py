@@ -155,7 +155,7 @@ class EventProcessor:
         if offset is None:
             return True
 
-        if isinstance(offset, timedelta, relativedelta):
+        if isinstance(offset, (timedelta, relativedelta)):
             now = timezone.now()
             return (now + offset) >= now
 
