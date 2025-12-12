@@ -117,7 +117,7 @@ class ProductionScenarioTests(TestCase):
         from django_ai.automation.queues import tasks as q2_tasks
 
         result = q2_tasks.poll_due_events(hours=24)
-        self.assertGreater(result["due_events_found"], 0)
+        self.assertGreater(result["total_processed"], 0)
 
     def test_workflow_with_database_rollback(self):
         """Test workflow behavior when database operations fail"""
@@ -168,7 +168,7 @@ class ProductionScenarioTests(TestCase):
 
         callback_calls = []
 
-        @event_workflow("checkin_due", offset_minutes=0)
+        @event_workflow("checkin_due", offset=timedelta())
         class ImmediateCheckinWorkflow:
             class Context(BaseModel):
                 booking_id: int
@@ -186,7 +186,7 @@ class ProductionScenarioTests(TestCase):
                 callback_calls.append(f"immediate_checkin_{ctx.booking_id}")
                 return complete()
 
-        @event_workflow("checkin_due", offset_minutes=60)  # 1 hour after
+        @event_workflow("checkin_due", offset=timedelta(minutes=60))  # 1 hour after
         class DelayedCheckinWorkflow:
             class Context(BaseModel):
                 booking_id: int
@@ -407,7 +407,7 @@ class ProductionScenarioTests(TestCase):
 
         # Should not crash
         self.assertIsInstance(result, dict)
-        self.assertIn("due_events_found", result)
+        self.assertIn("total_processed", result)
 
     def test_workflow_memory_and_context_limits(self):
         """Test workflows with large context data"""
