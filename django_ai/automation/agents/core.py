@@ -423,6 +423,7 @@ class AgentEngine:
                         return
 
                 # Execute handler
+                print(f"[AGENT DEBUG] BEFORE handler {execution.handler_name}")
                 try:
                     handler_method(context)
 
