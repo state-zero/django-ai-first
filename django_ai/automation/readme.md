@@ -10,7 +10,7 @@
 * **Immediate event**: `EventDefinition("name", condition=...)` — occurs on commit when condition is true.
 * **Scheduled event**: `EventDefinition("name", date_field="...")` — occurs at that datetime (still gated by condition).
 * **Single-step automation**: `@on_event("name") def handler(event): ...` — simple "event → action".
-* **Workflow**: `@event_workflow("name", offset_minutes=±N)` + `@step(...)` — multi-step, offsets, waits, retries.
+* **Workflow**: `@event_workflow("name", offset=timedelta(...))` + `@step(...)` — multi-step, offsets, waits, retries.
 * **Agent**: `@agent(spawn_on=["event1"], act_on=["event2"])` — long-running, stateful, cross-event processing.
 * **Waiting primitives**
 
@@ -76,7 +76,7 @@ Use a workflow when you need multiple steps, waits/sleeps, retries, or to run **
 from pydantic import BaseModel
 from django_ai.automation.workflows.core import event_workflow, step, complete
 
-@event_workflow(event_name="checkin_due", offset_minutes=-60)  # run 60m before check-in
+@event_workflow(event_name="checkin_due", offset=timedelta(minutes=-60))  # run 60m before check-in
 class PreArrivalReminder:
     class Context(BaseModel):
         reservation_id: int
@@ -94,8 +94,8 @@ class PreArrivalReminder:
 
 **Offsets**
 
-* `offset_minutes > 0` → after event time.
-* `offset_minutes < 0` → before event time.
+* Positive offset (e.g., `timedelta(hours=1)`) → after event time.
+* Negative offset (e.g., `timedelta(hours=-1)`) → before event time.
 * If scheduled for the future, the run is created `WAITING` with `wake_at`.
 
 ---
@@ -113,7 +113,7 @@ from django_ai.automation.workflows.core import (
 
 @event_workflow(
     event_name="checkout_due",
-    offset_minutes=-120,  # 2h before checkout
+    offset=timedelta(hours=-2),  # 2h before checkout
     default_retry=Retry(max_attempts=3, base_delay=timedelta(seconds=2)),
 )
 class CheckoutOpsWF:
@@ -417,7 +417,7 @@ def act(self):
 * Immediate: `EventDefinition("name", condition=...)`
 * Scheduled: `EventDefinition("name", date_field="dt", condition=...)`
 * Single-step: `@on_event("name") def handler(event): obj = event.entity`
-* Workflow (offsets): `@event_workflow("name", offset_minutes=±N)`
+* Workflow (offsets): `@event_workflow("name", offset=timedelta(...))`
 * Agent (long-running): `@agent(spawn_on=["e1"], act_on=["e2"], heartbeat=timedelta(...))`
 * Control flows: `goto`, `sleep`,
   `wait_for_event("EventName", timeout, on_timeout)`,

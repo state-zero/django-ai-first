@@ -13,7 +13,7 @@ from ..workflows.core import (
 from ..workflows.models import WorkflowRun, WorkflowStatus
 
 from .models import AgentRun, AgentStatus, HandlerExecution, HandlerStatus
-from ..events.callbacks import on_event, on_event_created
+from ..events.callbacks import on_event
 
 
 # Handler metadata stored on decorated methods
@@ -22,7 +22,7 @@ class HandlerInfo:
     """Metadata about a registered handler method"""
     method_name: str
     event_name: str
-    offset_minutes: int = 0
+    offset: timedelta = field(default_factory=timedelta)
     condition: Optional[Callable] = None
     retry: Optional[Retry] = None
 
@@ -34,7 +34,7 @@ _agent_handlers: Dict[str, List[HandlerInfo]] = {}  # agent_name -> list of hand
 
 def handler(
     event_name: str,
-    offset_minutes: int = 0,
+    offset: timedelta = None,
     condition: Optional[Callable[[Any, Any], bool]] = None,
     retry: Optional[Retry] = None,
 ):
@@ -43,12 +43,12 @@ def handler(
 
     Args:
         event_name: Event that triggers this handler
-        offset_minutes: Offset from event time in minutes. Negative = before, positive = after. Default 0.
+        offset: Offset from event time as timedelta. Negative = before, positive = after.
         condition: Optional callable(event, ctx) -> bool to conditionally execute handler
         retry: Retry policy for this handler
 
     Example:
-        @handler("move_in", offset_minutes=-3*24*60)  # -3 days before
+        @handler("move_in", offset=timedelta(days=-3))  # 3 days before
         def send_pre_checkin_reminder(self, ctx: Context):
             send_message(ctx.guest_name, "Your stay is coming up!")
             ctx.reminder_sent = True
@@ -56,7 +56,7 @@ def handler(
     def decorator(func):
         func._is_handler = True
         func._handler_event_name = event_name
-        func._handler_offset_minutes = offset_minutes
+        func._handler_offset = offset or timedelta()
         func._handler_condition = condition
         func._handler_retry = retry
         return func
@@ -104,7 +104,7 @@ def agent(
                     guest_name=reservation.guest.name,
                 )
 
-            @handler("move_in", offset_minutes=-3*60)  # -3 hours
+            @handler("move_in", offset=timedelta(hours=-3))
             def send_reminder(self, ctx: Context):
                 send_message(ctx.guest_name, "Check-in soon!")
                 ctx.reminder_sent = True
@@ -133,7 +133,7 @@ def agent(
                 handler_info = HandlerInfo(
                     method_name=attr_name,
                     event_name=attr._handler_event_name,
-                    offset_minutes=attr._handler_offset_minutes,
+                    offset=attr._handler_offset,
                     condition=attr._handler_condition,
                     retry=attr._handler_retry,
                 )
@@ -154,7 +154,7 @@ def agent(
 
         for handler_info in handlers:
             # Create unique key for event+offset
-            event_key = (handler_info.event_name, handler_info.offset_minutes)
+            event_key = (handler_info.event_name, handler_info.offset)
             if event_key not in registered_events:
                 _register_event_handler(name, handler_info, cls)
                 registered_events.add(event_key)
@@ -206,15 +206,15 @@ def _register_spawn_handler(
         )
 
         # Schedule handlers that listen to the spawn event
-        # These handlers missed the on_event_created callback since the agent
-        # didn't exist yet when the event was created
+        # These handlers missed the on_event callback since the agent
+        # didn't exist yet when the event fired
         for handler_info in agent_class._handlers:
             if handler_info.event_name == event_name:
                 agent_engine.schedule_handler(
                     agent_name=agent_name,
                     handler_name=handler_info.method_name,
                     event=event,
-                    offset_minutes=handler_info.offset_minutes,
+                    offset=handler_info.offset,
                 )
 
 
@@ -223,16 +223,26 @@ def _register_event_handler(
     handler_info: HandlerInfo,
     agent_class: type,
 ):
-    """Register callback to schedule handler when event is created (not when it occurs)"""
+    """Register callback to execute handler when event occurs (with offset support).
 
-    @on_event_created(event_name=handler_info.event_name, namespace="*")
+    Uses @on_event with offset (timedelta), which:
+    - For immediate events: fires when condition becomes true
+    - For scheduled events: fires at (event.at + offset) time
+
+    The event system handles offset-aware polling, so callbacks fire at the right time.
+    """
+    @on_event(
+        event_name=handler_info.event_name,
+        namespace="*",
+        offset=handler_info.offset,
+    )
     def handle_event_for_handler(event):
         # Schedule handler execution via the agent engine
         agent_engine.schedule_handler(
             agent_name=agent_name,
             handler_name=handler_info.method_name,
             event=event,
-            offset_minutes=handler_info.offset_minutes,
+            offset=handler_info.offset,
         )
 
 
@@ -295,17 +305,20 @@ class AgentEngine:
         agent_name: str,
         handler_name: str,
         event,
-        offset_minutes: int = 0,
+        offset: timedelta = None,
     ):
         """
         Schedule a handler for execution, respecting offset timing.
 
-        For offset_minutes != 0:
+        For non-zero offset:
             - Negative offset: Schedule before event.at time
             - Positive offset: Schedule after event.at time
 
         If the scheduled time is in the past, executes immediately.
         """
+        if offset is None:
+            offset = timedelta()
+
         if agent_name not in _agents:
             raise ValueError(f"Agent {agent_name} not found")
 
@@ -329,15 +342,10 @@ class AgentEngine:
 
         # Calculate scheduled time based on event.at and offset
         if hasattr(event, 'at') and event.at:
-            if offset_minutes < 0:
-                scheduled_at = event.at - timedelta(minutes=abs(offset_minutes))
-            elif offset_minutes > 0:
-                scheduled_at = event.at + timedelta(minutes=offset_minutes)
-            else:
-                scheduled_at = event.at
+            scheduled_at = event.at + offset
         else:
             # No event.at (immediate event) - schedule now + offset
-            scheduled_at = timezone.now() + timedelta(minutes=offset_minutes)
+            scheduled_at = timezone.now() + offset
 
         # Create handler execution record
         execution = HandlerExecution.objects.create(
@@ -345,7 +353,7 @@ class AgentEngine:
             handler_name=handler_name,
             event_name=event.event_name,
             event_id=event.id,
-            offset_minutes=offset_minutes,
+            offset=offset,
             status=HandlerStatus.PENDING,
             scheduled_at=scheduled_at,
         )

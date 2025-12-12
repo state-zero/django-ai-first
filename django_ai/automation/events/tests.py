@@ -697,3 +697,232 @@ class EventPrimaryKeyTypeCastingTest(TransactionTestCase):
         # Verify entities are correctly resolved
         self.assertEqual(booking_events[0].entity.guest_name, "Mixed Test Booking")
         self.assertEqual(uuid_events[0].entity.name, "Mixed Test UUID")
+
+
+class EventOffsetCallbackTest(TransactionTestCase):
+    """Test that callbacks with offsets fire at the correct time."""
+
+    def setUp(self):
+        from django_ai.automation.events.callbacks import callback_registry
+        callback_registry.clear()
+
+    def tearDown(self):
+        from django_ai.automation.events.callbacks import callback_registry
+        callback_registry.clear()
+
+    def test_callback_with_negative_offset_fires_before_event_time(self):
+        """Callback with negative offset should fire before event.at time."""
+        from django_ai.automation.events.callbacks import callback_registry, on_event
+        from django_ai.automation.events.services import event_processor
+        from django_ai.automation.testing import time_machine
+
+        callback_log = []
+
+        @on_event(event_name="checkin_due", offset=timedelta(minutes=-60))
+        def pre_checkin_callback(event):
+            callback_log.append(f"pre_checkin:{event.entity_id}")
+
+        @on_event(event_name="checkin_due")
+        def at_checkin_callback(event):
+            callback_log.append(f"at_checkin:{event.entity_id}")
+
+        with time_machine() as tm:
+            # Create booking with checkin 3 hours from now
+            now = timezone.now()
+            checkin_time = now + timedelta(hours=3)
+
+            booking = TestBooking.objects.create(
+                guest_name="Offset Test",
+                checkin_date=checkin_time,
+                checkout_date=checkin_time + timedelta(days=1),
+                status="confirmed",
+            )
+
+            # At creation time, no callbacks should have fired yet
+            self.assertEqual(callback_log, [])
+
+            # Advance to 1 hour before checkin (2 hours from start)
+            # This is when the -60 offset callback should fire
+            tm.advance(hours=2, minutes=1)
+
+            self.assertIn(f"pre_checkin:{booking.id}", callback_log)
+            self.assertNotIn(f"at_checkin:{booking.id}", callback_log)
+
+            # Advance to checkin time
+            tm.advance(hours=1)
+
+            self.assertIn(f"at_checkin:{booking.id}", callback_log)
+
+    def test_callback_with_positive_offset_fires_after_event_time(self):
+        """Callback with positive offset should fire after event.at time."""
+        from django_ai.automation.events.callbacks import callback_registry, on_event
+        from django_ai.automation.testing import time_machine
+
+        callback_log = []
+
+        @on_event(event_name="checkout_due", offset=timedelta(minutes=60))
+        def post_checkout_callback(event):
+            callback_log.append(f"post_checkout:{event.entity_id}")
+
+        @on_event(event_name="checkout_due")
+        def at_checkout_callback(event):
+            callback_log.append(f"at_checkout:{event.entity_id}")
+
+        with time_machine() as tm:
+            now = timezone.now()
+            checkout_time = now + timedelta(hours=2)
+
+            booking = TestBooking.objects.create(
+                guest_name="Positive Offset Test",
+                checkin_date=now - timedelta(days=1),
+                checkout_date=checkout_time,
+                status="confirmed",
+            )
+
+            # No callbacks yet
+            self.assertEqual(callback_log, [])
+
+            # Advance to checkout time
+            tm.advance(hours=2, minutes=1)
+
+            self.assertIn(f"at_checkout:{booking.id}", callback_log)
+            self.assertNotIn(f"post_checkout:{booking.id}", callback_log)
+
+            # Advance 1 more hour (past the +60 offset)
+            tm.advance(hours=1)
+
+            self.assertIn(f"post_checkout:{booking.id}", callback_log)
+
+    def test_multiple_offsets_same_event(self):
+        """Multiple callbacks with different offsets on same event fire at correct times."""
+        from django_ai.automation.events.callbacks import callback_registry, on_event
+        from django_ai.automation.testing import time_machine
+
+        callback_log = []
+
+        @on_event(event_name="checkin_due", offset=timedelta(minutes=-120))
+        def two_hours_before(event):
+            callback_log.append("2h_before")
+
+        @on_event(event_name="checkin_due", offset=timedelta(minutes=-60))
+        def one_hour_before(event):
+            callback_log.append("1h_before")
+
+        @on_event(event_name="checkin_due")
+        def at_checkin(event):
+            callback_log.append("at_checkin")
+
+        @on_event(event_name="checkin_due", offset=timedelta(minutes=60))
+        def one_hour_after(event):
+            callback_log.append("1h_after")
+
+        with time_machine() as tm:
+            now = timezone.now()
+            checkin_time = now + timedelta(hours=4)
+
+            TestBooking.objects.create(
+                guest_name="Multi Offset Test",
+                checkin_date=checkin_time,
+                checkout_date=checkin_time + timedelta(days=1),
+                status="confirmed",
+            )
+
+            # Advance to 2 hours before checkin
+            tm.advance(hours=2, minutes=1)
+            self.assertIn("2h_before", callback_log)
+            self.assertNotIn("1h_before", callback_log)
+
+            # Advance to 1 hour before checkin
+            tm.advance(hours=1)
+            self.assertIn("1h_before", callback_log)
+            self.assertNotIn("at_checkin", callback_log)
+
+            # Advance to checkin time
+            tm.advance(hours=1)
+            self.assertIn("at_checkin", callback_log)
+            self.assertNotIn("1h_after", callback_log)
+
+            # Advance to 1 hour after checkin
+            tm.advance(hours=1)
+            self.assertIn("1h_after", callback_log)
+
+    def test_offset_callbacks_only_fire_once(self):
+        """Callbacks with offsets should only fire once, not on every poll cycle."""
+        from django_ai.automation.events.callbacks import callback_registry, on_event
+        from django_ai.automation.testing import time_machine
+
+        callback_counts = {"2h_before": 0, "1h_before": 0, "at_checkin": 0, "1h_after": 0}
+
+        @on_event(event_name="checkin_due", offset=timedelta(minutes=-120))
+        def two_hours_before(event):
+            callback_counts["2h_before"] += 1
+
+        @on_event(event_name="checkin_due", offset=timedelta(minutes=-60))
+        def one_hour_before(event):
+            callback_counts["1h_before"] += 1
+
+        @on_event(event_name="checkin_due")
+        def at_checkin(event):
+            callback_counts["at_checkin"] += 1
+
+        @on_event(event_name="checkin_due", offset=timedelta(minutes=60))
+        def one_hour_after(event):
+            callback_counts["1h_after"] += 1
+
+        with time_machine() as tm:
+            now = timezone.now()
+            checkin_time = now + timedelta(hours=4)
+
+            TestBooking.objects.create(
+                guest_name="Idempotency Test",
+                checkin_date=checkin_time,
+                checkout_date=checkin_time + timedelta(days=1),
+                status="confirmed",
+            )
+
+            # Advance to 2 hours before checkin and poll multiple times
+            tm.advance(hours=2, minutes=1)
+            self.assertEqual(callback_counts["2h_before"], 1)
+
+            # Process again - should NOT increment
+            tm.process()
+            tm.process()
+            tm.process()
+            self.assertEqual(callback_counts["2h_before"], 1, "2h_before callback fired multiple times!")
+
+            # Advance to 1 hour before checkin
+            tm.advance(hours=1)
+            self.assertEqual(callback_counts["1h_before"], 1)
+
+            # Process again - should NOT increment
+            tm.process()
+            tm.process()
+            self.assertEqual(callback_counts["1h_before"], 1, "1h_before callback fired multiple times!")
+            # 2h_before should still be 1
+            self.assertEqual(callback_counts["2h_before"], 1)
+
+            # Advance to checkin time
+            tm.advance(hours=1)
+            self.assertEqual(callback_counts["at_checkin"], 1)
+
+            # Process again - should NOT increment
+            tm.process()
+            tm.process()
+            self.assertEqual(callback_counts["at_checkin"], 1, "at_checkin callback fired multiple times!")
+
+            # Advance to 1 hour after checkin
+            tm.advance(hours=1)
+            self.assertEqual(callback_counts["1h_after"], 1)
+
+            # Process again - should NOT increment
+            tm.process()
+            tm.process()
+            self.assertEqual(callback_counts["1h_after"], 1, "1h_after callback fired multiple times!")
+
+            # Final check - each callback should have fired exactly once
+            self.assertEqual(callback_counts, {
+                "2h_before": 1,
+                "1h_before": 1,
+                "at_checkin": 1,
+                "1h_after": 1,
+            })

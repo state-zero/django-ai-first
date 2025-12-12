@@ -322,6 +322,31 @@ class Event(models.Model):
         return None
 
 
+class ProcessedEventOffset(models.Model):
+    """
+    Tracks which (event, offset) combinations have had their callbacks fired.
+
+    Once an offset callback has fired for an event, it won't fire again even
+    if the event moves (date changes). This prevents duplicate side effects.
+    """
+    event = models.ForeignKey(
+        'Event',
+        on_delete=models.CASCADE,
+        related_name='processed_offsets'
+    )
+    offset = models.DurationField()
+    processed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['event', 'offset']
+        indexes = [
+            models.Index(fields=['event', 'offset']),
+        ]
+
+    def __str__(self):
+        return f"Processed {self.event.event_name} @ offset {self.offset}"
+
+
 class EventQuerySet(models.QuerySet):
 
     def with_entities(self):

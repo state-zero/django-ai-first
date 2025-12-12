@@ -664,7 +664,7 @@ class OrderProcessingWorkflow:
 ### Event Workflows with Timing Offsets
 
 ```python
-@event_workflow("appointment_due", offset_minutes=-60)
+@event_workflow("appointment_due", offset=timedelta(minutes=-60))
 class PreAppointmentReminder:
     @step(start=True)
     def send_reminder(self):

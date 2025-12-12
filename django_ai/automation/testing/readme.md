@@ -230,17 +230,17 @@ class BookingAgent:
     def create_context(cls, event):
         return cls.Context(booking_id=event.entity.id)
 
-    @handler("move_in", offset_minutes=-180)  # 3 hours before checkin
+    @handler("move_in", offset=timedelta(minutes=-180))  # 3 hours before checkin
     def send_pre_checkin(self, ctx):
         # Send pre-checkin email
         pass
 
-    @handler("move_in", offset_minutes=0)  # At checkin time
+    @handler("move_in")  # At checkin time
     def send_welcome(self, ctx):
         # Send welcome message
         pass
 
-    @handler("move_in", offset_minutes=60)  # 1 hour after checkin
+    @handler("move_in", offset=timedelta(minutes=60))  # 1 hour after checkin
     def send_followup(self, ctx):
         # Send followup
         pass

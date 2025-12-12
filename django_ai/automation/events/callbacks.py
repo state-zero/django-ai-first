@@ -1,5 +1,6 @@
 from typing import Callable, Dict, List, Any, Protocol
 from dataclasses import dataclass, field
+from datetime import timedelta
 import uuid
 from enum import Enum
 import logging
@@ -30,7 +31,8 @@ class CallbackRegistration:
     callback: EventCallback
     event_name: str = "*"  # Specific event name or "*" for all
     phase: EventPhase = EventPhase.OCCURRED
-    namespace: str = "*" # Specific event namespace or "*" for all
+    namespace: str = "*"  # Specific event namespace or "*" for all
+    offset: timedelta = field(default_factory=timedelta)  # Offset from event time
     _id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
@@ -47,6 +49,7 @@ class EventCallbackRegistry:
         event_name: str = "*",
         namespace: str = "*",
         phase: EventPhase = EventPhase.OCCURRED,
+        offset: timedelta = None,
     ) -> None:
         """Register a callback for events"""
         callback_id: int = id(callback)
@@ -55,6 +58,7 @@ class EventCallbackRegistry:
             event_name=event_name,
             namespace=namespace,
             phase=phase,
+            offset=offset or timedelta(),
         )
 
         self._callbacks[callback_id] = registration
@@ -66,16 +70,28 @@ class EventCallbackRegistry:
             return True
         return False
 
-    def notify(self, event: "Event", phase: EventPhase) -> None:
-        """Notify all matching callbacks about an event"""
+    def notify(
+        self, event: "Event", phase: EventPhase, offset: timedelta = None
+    ) -> None:
+        """Notify all matching callbacks about an event
+
+        Args:
+            event: The event to notify about
+            phase: The phase (CREATED, OCCURRED, CANCELLED)
+            offset: If provided, only notify callbacks registered for this offset.
+                   If None, notify callbacks with zero offset (immediate).
+        """
         if not self._enabled:
             return
+
+        target_offset = offset or timedelta()
 
         # Find matching callbacks
         matching = []
         for reg in self._callbacks.values():
             if (
                 reg.phase == phase
+                and reg.offset == target_offset
                 and (reg.event_name == "*" or reg.event_name == event.event_name)
                 and (reg.namespace == "*" or reg.namespace == event.namespace)
             ):
@@ -90,6 +106,17 @@ class EventCallbackRegistry:
                     f"Event callback {reg.callback} failed for event {event.id}: {e}",
                     exc_info=True,
                 )
+
+    def get_registered_offsets(self, phase: EventPhase = EventPhase.OCCURRED) -> set:
+        """Get all unique offsets registered for a given phase.
+
+        Used by the event processor to know which offsets to poll for.
+        """
+        return {
+            reg.offset
+            for reg in self._callbacks.values()
+            if reg.phase == phase
+        }
 
     def disable(self):
         """Temporarily disable all callbacks"""
@@ -111,7 +138,7 @@ class EventCallbackRegistry:
                 "event_name": reg.event_name,
                 "phase": reg.phase.value,
             }
-            for reg in self._callbacks
+            for reg in self._callbacks.values()
         ]
 
 
@@ -124,11 +151,12 @@ def on_event_base(
     event_name: str = "*",
     namespace: str = "*",
     phase: EventPhase = EventPhase.OCCURRED,
+    offset: timedelta = None,
 ):
     """Base decorator to register event callbacks"""
 
     def decorator(func: Callable[["Event"], None]):
-        callback_registry.register(func, event_name, namespace, phase)
+        callback_registry.register(func, event_name, namespace, phase, offset)
         return func
 
     return decorator
@@ -138,9 +166,17 @@ def on_event_created(event_name: str = "*", namespace: str = "*"):
     return on_event_base(event_name, namespace, EventPhase.CREATED)
 
 
-def on_event(event_name: str = "*", namespace: str = "*"):
-    """Decorator for when events occur (default behavior)"""
-    return on_event_base(event_name, namespace, EventPhase.OCCURRED)
+def on_event(event_name: str = "*", namespace: str = "*", offset: timedelta = None):
+    """Decorator for when events occur (default behavior)
+
+    Args:
+        event_name: Event name to listen for, or "*" for all
+        namespace: Namespace to filter by, or "*" for all
+        offset: Offset from event.at time as a timedelta.
+               Negative = before, positive = after.
+               E.g., timedelta(hours=-1) fires 1 hour BEFORE the event time.
+    """
+    return on_event_base(event_name, namespace, EventPhase.OCCURRED, offset)
 
 
 def on_event_cancelled(event_name: str = "*", namespace: str = "*"):

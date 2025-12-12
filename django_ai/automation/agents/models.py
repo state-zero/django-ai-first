@@ -1,3 +1,4 @@
+from datetime import timedelta
 from django.db import models
 from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
@@ -73,7 +74,7 @@ class HandlerExecution(models.Model):
     handler_name = models.CharField(max_length=255)
     event_name = models.CharField(max_length=255)
     event_id = models.IntegerField(null=True, blank=True)
-    offset_minutes = models.IntegerField(default=0)
+    offset = models.DurationField(default=timedelta)
 
     # Status tracking
     status = models.CharField(

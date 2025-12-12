@@ -96,7 +96,7 @@ class DecoratorValidationTests(TestCase):
 
         @handler(
             "move_in",
-            offset_minutes=-180,
+            offset=timedelta(minutes=-180),
             condition=my_condition,
             retry=retry_policy,
         )
@@ -105,7 +105,7 @@ class DecoratorValidationTests(TestCase):
 
         self.assertTrue(test_handler._is_handler)
         self.assertEqual(test_handler._handler_event_name, "move_in")
-        self.assertEqual(test_handler._handler_offset_minutes, -180)
+        self.assertEqual(test_handler._handler_offset, timedelta(minutes=-180))
         self.assertEqual(test_handler._handler_condition, my_condition)
         self.assertEqual(test_handler._handler_retry, retry_policy)
 
@@ -142,11 +142,11 @@ class DecoratorValidationTests(TestCase):
             def create_context(cls, event):
                 return cls.Context()
 
-            @handler("move_in", offset_minutes=-180)
+            @handler("move_in", offset=timedelta(minutes=-180))
             def handler_one(self, ctx):
                 pass
 
-            @handler("move_in", offset_minutes=0)
+            @handler("move_in")
             def handler_two(self, ctx):
                 pass
 
@@ -325,7 +325,7 @@ class AgentIntegrationTests(TransactionTestCase):
             def create_context(cls, event):
                 return cls.Context()
 
-            @handler("move_in", offset_minutes=60)  # 1 hour after checkin
+            @handler("move_in", offset=timedelta(minutes=60))  # 1 hour after checkin
             def send_followup(self, ctx):
                 handler_log.append("followup_sent")
 
@@ -373,7 +373,7 @@ class AgentIntegrationTests(TransactionTestCase):
             def create_context(cls, event):
                 return cls.Context()
 
-            @handler("move_in", offset_minutes=-180)  # 3 hours before checkin
+            @handler("move_in", offset=timedelta(minutes=-180))  # 3 hours before checkin
             def send_pre_checkin(self, ctx):
                 handler_log.append("pre_checkin_sent")
 
@@ -412,15 +412,15 @@ class AgentIntegrationTests(TransactionTestCase):
             def create_context(cls, event):
                 return cls.Context()
 
-            @handler("move_in", offset_minutes=-60)  # 1 hour before
+            @handler("move_in", offset=timedelta(minutes=-60))  # 1 hour before
             def one_hour_before(self, ctx):
                 handler_log.append("1h_before")
 
-            @handler("move_in", offset_minutes=0)  # At checkin
+            @handler("move_in")  # At checkin
             def at_checkin(self, ctx):
                 handler_log.append("at_checkin")
 
-            @handler("move_in", offset_minutes=60)  # 1 hour after
+            @handler("move_in", offset=timedelta(minutes=60))  # 1 hour after
             def one_hour_after(self, ctx):
                 handler_log.append("1h_after")
 
@@ -552,21 +552,21 @@ class AgentIntegrationTests(TransactionTestCase):
                     guest_name=booking.guest.name,
                 )
 
-            @handler("booking_confirmed", offset_minutes=0)
+            @handler("booking_confirmed")
             def send_confirmation(self, ctx):
                 journey_log.append(f"confirmation:{ctx.reservation_id}")
 
-            @handler("move_in", offset_minutes=-180)  # 3 hours before
+            @handler("move_in", offset=timedelta(minutes=-180))  # 3 hours before
             def send_pre_checkin(self, ctx):
                 journey_log.append(f"pre_checkin:{ctx.reservation_id}")
                 ctx.pre_checkin_sent = True
 
-            @handler("move_in", offset_minutes=0)
+            @handler("move_in")
             def send_welcome(self, ctx):
                 journey_log.append(f"welcome:{ctx.reservation_id}")
                 ctx.welcome_sent = True
 
-            @handler("move_out", offset_minutes=0)
+            @handler("move_out")
             def send_checkout(self, ctx):
                 journey_log.append(f"checkout:{ctx.reservation_id}")
                 ctx.checkout_sent = True
@@ -806,6 +806,227 @@ class HandlerOnSpawnEventTests(TransactionTestCase):
                 agent_run.context["access_code_set"],
                 "Handler should have updated context",
             )
+
+
+@override_settings(SKIP_Q2_AUTOSCHEDULE=True)
+class EventConditionTests(TransactionTestCase):
+    """Test that handlers respect EventDefinition conditions.
+
+    This test class verifies that handlers are NOT executed when their
+    event's condition is false. This catches the bug where handlers
+    listening to events like 'booking_cancelled' would incorrectly
+    execute when a booking was created with status='confirmed'.
+    """
+
+    def setUp(self):
+        engine.set_executor(SynchronousExecutor())
+        agent_engine.set_executor(SynchronousExecutor())
+        _agents.clear()
+        _agent_handlers.clear()
+        callback_registry.clear()
+
+        from django_ai.automation.workflows.integration import handle_event_for_workflows
+
+        callback_registry.register(
+            handle_event_for_workflows, event_name="*", namespace="*"
+        )
+
+        self.guest = Guest.objects.create(email="condition@example.com", name="Condition Test")
+
+    def tearDown(self):
+        callback_registry.clear()
+        _agents.clear()
+        _agent_handlers.clear()
+
+    def test_handler_does_not_execute_when_event_condition_is_false(self):
+        """Handler should NOT execute when its event's condition is false.
+
+        This is the exact bug from the GuestJourneyAgent issue:
+        - Agent spawns on 'booking_created'
+        - Agent has handler for 'booking_cancelled' with condition: status == 'cancelled'
+        - When booking is created with status='pending', the 'booking_cancelled'
+          handler should NOT run because the condition is false.
+        """
+        handler_log = []
+
+        @agent("journey_agent", spawn_on="booking_created")
+        class JourneyAgent:
+            class Context(BaseModel):
+                booking_id: int = 0
+
+            def get_namespace(self, event):
+                return f"booking:{event.entity.id}"
+
+            @classmethod
+            def create_context(cls, event):
+                return cls.Context(booking_id=event.entity.id)
+
+            @handler("booking_created")
+            def on_created(self, ctx):
+                """This should execute - booking_created condition is always true."""
+                handler_log.append("on_created")
+
+            @handler("booking_confirmed")
+            def on_confirmed(self, ctx):
+                """This should NOT execute - status is 'pending', not 'confirmed'."""
+                handler_log.append("on_confirmed")
+
+            @handler("guest_checked_in")
+            def on_checked_in(self, ctx):
+                """This should NOT execute - status is 'pending', not 'checked_in'."""
+                handler_log.append("on_checked_in")
+
+        with time_machine() as tm:
+            # Create booking with status='pending'
+            # This fires booking_created (condition: always true)
+            # But NOT booking_confirmed (condition: status == 'confirmed')
+            # And NOT guest_checked_in (condition: status == 'checked_in')
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=timezone.now() + timedelta(days=1),
+                checkout_date=timezone.now() + timedelta(days=2),
+                status="pending",
+            )
+
+            # Process any pending work
+            tm.process()
+
+            # Verify agent was created
+            agent_run = AgentRun.objects.filter(
+                agent_name="journey_agent",
+                namespace=f"booking:{booking.id}",
+            ).first()
+            self.assertIsNotNone(agent_run)
+
+            # CRITICAL: Only booking_created handler should have executed
+            self.assertIn("on_created", handler_log,
+                "Handler for booking_created should execute")
+            self.assertNotIn("on_confirmed", handler_log,
+                "Handler for booking_confirmed should NOT execute when status='pending'")
+            self.assertNotIn("on_checked_in", handler_log,
+                "Handler for guest_checked_in should NOT execute when status='pending'")
+
+            # Verify HandlerExecution records
+            executions = HandlerExecution.objects.filter(agent_run=agent_run)
+            handler_names = [e.handler_name for e in executions]
+
+            self.assertIn("on_created", handler_names,
+                "HandlerExecution should exist for on_created")
+            self.assertNotIn("on_confirmed", handler_names,
+                "HandlerExecution should NOT exist for on_confirmed")
+            self.assertNotIn("on_checked_in", handler_names,
+                "HandlerExecution should NOT exist for on_checked_in")
+
+    def test_handler_executes_when_event_condition_becomes_true(self):
+        """Handler should execute when event condition changes from false to true.
+
+        Tests that handlers are correctly triggered when a model is updated
+        and the event's condition becomes true.
+        """
+        handler_log = []
+
+        @agent("status_agent", spawn_on="booking_created")
+        class StatusAgent:
+            class Context(BaseModel):
+                booking_id: int = 0
+
+            def get_namespace(self, event):
+                return f"booking:{event.entity.id}"
+
+            @classmethod
+            def create_context(cls, event):
+                return cls.Context(booking_id=event.entity.id)
+
+            @handler("booking_created")
+            def on_created(self, ctx):
+                handler_log.append("on_created")
+
+            @handler("booking_confirmed")
+            def on_confirmed(self, ctx):
+                handler_log.append("on_confirmed")
+
+        with time_machine() as tm:
+            # Create booking with status='pending'
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=timezone.now() + timedelta(days=1),
+                checkout_date=timezone.now() + timedelta(days=2),
+                status="pending",
+            )
+            tm.process()
+
+            # Only on_created should have run
+            self.assertIn("on_created", handler_log)
+            self.assertNotIn("on_confirmed", handler_log)
+
+            # Now update status to 'confirmed'
+            handler_log.clear()
+            booking.status = "confirmed"
+            booking.save()
+            tm.process()
+
+            # Now on_confirmed should have run
+            self.assertIn("on_confirmed", handler_log,
+                "Handler should execute when event condition becomes true")
+
+    def test_multiple_events_only_valid_ones_trigger_handlers(self):
+        """When multiple events exist, only those with true conditions trigger handlers.
+
+        This simulates the real GuestJourneyAgent scenario where both
+        reservation_confirmed and reservation_cancelled events exist,
+        but only one should trigger based on the reservation status.
+        """
+        handler_log = []
+
+        @agent("multi_event_agent", spawn_on="booking_created")
+        class MultiEventAgent:
+            class Context(BaseModel):
+                booking_id: int = 0
+
+            def get_namespace(self, event):
+                return f"booking:{event.entity.id}"
+
+            @classmethod
+            def create_context(cls, event):
+                return cls.Context(booking_id=event.entity.id)
+
+            @handler("booking_created")
+            def handle_created(self, ctx):
+                handler_log.append("created")
+
+            @handler("booking_confirmed")
+            def handle_confirmed(self, ctx):
+                """Condition: status == 'confirmed'"""
+                handler_log.append("confirmed")
+
+            @handler("payment_received")
+            def handle_payment(self, ctx):
+                """Condition: payment_confirmed == True"""
+                handler_log.append("payment")
+
+            @handler("guest_checked_in")
+            def handle_checkin(self, ctx):
+                """Condition: status == 'checked_in'"""
+                handler_log.append("checked_in")
+
+        with time_machine() as tm:
+            # Create confirmed booking with payment
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=timezone.now() + timedelta(days=1),
+                checkout_date=timezone.now() + timedelta(days=2),
+                status="confirmed",
+                payment_confirmed=True,
+            )
+            tm.process()
+
+            # Should have: created, confirmed, payment
+            # Should NOT have: checked_in
+            self.assertIn("created", handler_log)
+            self.assertIn("confirmed", handler_log)
+            self.assertIn("payment", handler_log)
+            self.assertNotIn("checked_in", handler_log,
+                "guest_checked_in handler should NOT run when status='confirmed'")
 
 
 if __name__ == "__main__":

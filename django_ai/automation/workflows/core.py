@@ -303,16 +303,26 @@ def workflow(name: str, version: str = "1", default_retry: Optional[Retry] = Non
 
 def event_workflow(
     event_name: str,
-    offset_minutes: int = 0,
+    offset: timedelta = None,
     version: str = "1",
     default_retry: Optional[Retry] = None,
 ):
     """
     Decorator for workflows triggered by events.
     Replaces the old automation system.
+
+    Args:
+        event_name: Name of the event that triggers this workflow
+        offset: Offset from event time as timedelta. Negative = before, positive = after.
+        version: Workflow version string
+        default_retry: Default retry policy for steps
     """
 
     def decorator(cls):
+        nonlocal offset
+        if offset is None:
+            offset = timedelta()
+
         # Validate like normal workflow
         if not hasattr(cls, "Context"):
             raise ValueError(
@@ -353,14 +363,14 @@ def event_workflow(
             raise ValueError(f"Event workflow must have a start step")
 
         # Generate unique workflow name
-        workflow_name = f"event:{event_name}:{offset_minutes}"
+        workflow_name = f"event:{event_name}:{offset}"
 
         cls._workflow_name = workflow_name
         cls._workflow_version = version
         cls._default_retry = default_retry or Retry()
         cls._start_step = start_step
         cls._event_name = event_name
-        cls._offset_minutes = offset_minutes
+        cls._offset = offset
 
         # Register in both places
         _workflows[workflow_name] = cls
@@ -481,15 +491,12 @@ class WorkflowEngine:
         )
 
         # Handle offset timing
-        if workflow_cls._offset_minutes != 0:
-            # Schedule for later
-            delay = timedelta(minutes=abs(workflow_cls._offset_minutes))
-            if workflow_cls._offset_minutes < 0:
-                # Negative offset - schedule before event time
-                run_time = event.at - delay if event.at else timezone.now()
+        if workflow_cls._offset != timedelta():
+            # Schedule for later based on offset
+            if event.at:
+                run_time = event.at + workflow_cls._offset
             else:
-                # Positive offset - schedule after event time
-                run_time = (event.at + delay) if event.at else (timezone.now() + delay)
+                run_time = timezone.now() + workflow_cls._offset
 
             if run_time > timezone.now():
                 run.status = WorkflowStatus.WAITING

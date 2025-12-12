@@ -458,7 +458,7 @@ class TestTimeMachineEventWorkflowIntegration(TransactionTestCase):
         from django_ai.automation.events.models import Event, EventStatus
 
         # Define an event workflow with a 15-minute offset
-        @event_workflow(event_name="scheduled_evt", offset_minutes=15)
+        @event_workflow(event_name="scheduled_evt", offset=timedelta(minutes=15))
         class ScheduledWithOffsetWF:
             class Context(BaseModel):
                 started: bool = False
@@ -504,7 +504,7 @@ class TestTimeMachineEventWorkflowIntegration(TransactionTestCase):
             # Workflow should be created but waiting (due to 15min offset)
             run = WorkflowRun.objects.filter(
                 triggered_by_event_id=ev.id,
-                name="event:scheduled_evt:15"
+                name=f"event:scheduled_evt:{timedelta(minutes=15)}"
             ).first()
             self.assertIsNotNone(run)
             self.assertEqual(run.status, WorkflowStatus.WAITING)
@@ -604,7 +604,7 @@ class TestTimeMachineEventWorkflowIntegration(TransactionTestCase):
 
         # First workflow: triggered by scheduled_evt with 10min offset
         # Creates another scheduled event for 30min later
-        @event_workflow(event_name="scheduled_evt", offset_minutes=10)
+        @event_workflow(event_name="scheduled_evt", offset=timedelta(minutes=10))
         class FirstHandlerWF:
             class Context(BaseModel):
                 processed: bool = False
@@ -629,7 +629,7 @@ class TestTimeMachineEventWorkflowIntegration(TransactionTestCase):
         # We need a different event name or we'd conflict, so let's use a marker
         second_handler_completed = []
 
-        @event_workflow(event_name="scheduled_evt", offset_minutes=0)
+        @event_workflow(event_name="scheduled_evt")
         class SecondHandlerWF:
             class Context(BaseModel):
                 final: bool = False
@@ -664,7 +664,7 @@ class TestTimeMachineEventWorkflowIntegration(TransactionTestCase):
 
             first_run = WorkflowRun.objects.filter(
                 triggered_by_event_id=ev.id,
-                name="event:scheduled_evt:10"
+                name=f"event:scheduled_evt:{timedelta(minutes=10)}"
             ).first()
             self.assertIsNotNone(first_run)
             self.assertEqual(first_run.status, WorkflowStatus.WAITING)
