@@ -285,12 +285,12 @@ class AgentIntegrationTests(TransactionTestCase):
                 ctx.handled = True
 
         with time_machine() as tm:
-            # Create booking - spawns agent
+            # Create booking with confirmed status - spawns agent and triggers booking_confirmed
             booking = Booking.objects.create(
                 guest=self.guest,
                 checkin_date=timezone.now() + timedelta(days=1),
                 checkout_date=timezone.now() + timedelta(days=2),
-                status="pending",
+                status="confirmed",
             )
 
             agent_run = AgentRun.objects.get(
@@ -298,11 +298,7 @@ class AgentIntegrationTests(TransactionTestCase):
                 namespace=f"booking:{booking.id}",
             )
 
-            # Update booking status - triggers booking_confirmed event
-            booking.status = "confirmed"
-            booking.save()
-
-            # Handler should have been called
+            # Handler should have been called (booking_confirmed fires on create when status=confirmed)
             self.assertIn("on_confirmed_called", handler_log)
 
             # Context should have been updated

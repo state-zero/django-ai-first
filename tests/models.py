@@ -111,7 +111,7 @@ class Booking(models.Model):
 
     # Events for this model
     events = [
-        # Immediate events - occur right after save when condition is true
+        # Immediate events - fire once on creation when condition is true
         EventDefinition("booking_created", condition=lambda b: True),
         EventDefinition(
             "booking_confirmed", condition=lambda b: b.status == "confirmed"
@@ -123,6 +123,12 @@ class Booking(models.Model):
         EventDefinition(
             "housekeeping_confirmed",
             condition=lambda b: b.status == "housekeeping_ready",
+        ),
+        # Repeatable event - fires on every update when condition is true
+        EventDefinition(
+            "booking_modified",
+            condition=lambda b: b.status == "confirmed",
+            trigger=EventTrigger.UPDATE,
         ),
         # Scheduled events - occur at specific datetime when condition is true
         EventDefinition(
