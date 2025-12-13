@@ -953,5 +953,163 @@ class EventConditionTests(TransactionTestCase):
                 "guest_checked_in handler should NOT run when status='confirmed'")
 
 
+@override_settings(SKIP_Q2_AUTOSCHEDULE=True)
+class HandlerEventParameterTests(TransactionTestCase):
+    """Test that handlers can receive the event parameter when requested."""
+
+    def setUp(self):
+        engine.set_executor(SynchronousExecutor())
+        agent_engine.set_executor(SynchronousExecutor())
+        _agents.clear()
+        _agent_handlers.clear()
+        callback_registry.clear()
+
+        from django_ai.automation.workflows.integration import handle_event_for_workflows
+
+        callback_registry.register(
+            handle_event_for_workflows, event_name="*", namespace="*"
+        )
+
+        self.guest = Guest.objects.create(email="event@example.com", name="Event Test")
+
+    def tearDown(self):
+        callback_registry.clear()
+        _agents.clear()
+        _agent_handlers.clear()
+
+    def test_handler_receives_event_when_requested(self):
+        """Handler with event parameter receives the event object."""
+        captured_events = []
+
+        @agent("event_param_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        class EventParamAgent:
+            class Context(BaseModel):
+                booking_id: int = 0
+
+            @classmethod
+            def create_context(cls, event):
+                return cls.Context(booking_id=event.entity.id)
+
+            @handler("booking_confirmed")
+            def on_confirmed(self, ctx, event):
+                """Handler requests event parameter."""
+                captured_events.append({
+                    "event_name": event.event_name,
+                    "entity_id": event.entity_id,
+                    "entity": event.entity,
+                })
+
+        with time_machine() as tm:
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=timezone.now() + timedelta(days=1),
+                checkout_date=timezone.now() + timedelta(days=2),
+                status="confirmed",
+            )
+
+            # Handler should have received the event
+            self.assertEqual(len(captured_events), 1)
+            self.assertEqual(captured_events[0]["event_name"], "booking_confirmed")
+            self.assertEqual(captured_events[0]["entity_id"], str(booking.id))
+            self.assertEqual(captured_events[0]["entity"].id, booking.id)
+
+    def test_handler_without_event_parameter_still_works(self):
+        """Handler without event parameter continues to work (backward compatible)."""
+        handler_log = []
+
+        @agent("no_event_param_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        class NoEventParamAgent:
+            class Context(BaseModel):
+                booking_id: int = 0
+
+            @classmethod
+            def create_context(cls, event):
+                return cls.Context(booking_id=event.entity.id)
+
+            @handler("booking_confirmed")
+            def on_confirmed(self, ctx):
+                """Handler does NOT request event parameter."""
+                handler_log.append("confirmed")
+
+        with time_machine() as tm:
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=timezone.now() + timedelta(days=1),
+                checkout_date=timezone.now() + timedelta(days=2),
+                status="confirmed",
+            )
+
+            # Handler should have executed without error
+            self.assertIn("confirmed", handler_log)
+
+    def test_handler_can_access_event_entity(self):
+        """Handler can access the entity that triggered the event."""
+        entity_data = []
+
+        @agent("entity_access_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        class EntityAccessAgent:
+            class Context(BaseModel):
+                booking_id: int = 0
+
+            @classmethod
+            def create_context(cls, event):
+                return cls.Context(booking_id=event.entity.id)
+
+            @handler("booking_confirmed")
+            def on_confirmed(self, ctx, event):
+                # Access entity properties directly from event
+                booking = event.entity
+                entity_data.append({
+                    "guest_name": booking.guest.name,
+                    "status": booking.status,
+                })
+
+        with time_machine() as tm:
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=timezone.now() + timedelta(days=1),
+                checkout_date=timezone.now() + timedelta(days=2),
+                status="confirmed",
+            )
+
+            self.assertEqual(len(entity_data), 1)
+            self.assertEqual(entity_data[0]["guest_name"], "Event Test")
+            self.assertEqual(entity_data[0]["status"], "confirmed")
+
+    def test_mixed_handlers_with_and_without_event(self):
+        """Agent can have both handler types - with and without event param."""
+        handler_log = []
+
+        @agent("mixed_handlers_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        class MixedHandlersAgent:
+            class Context(BaseModel):
+                booking_id: int = 0
+
+            @classmethod
+            def create_context(cls, event):
+                return cls.Context(booking_id=event.entity.id)
+
+            @handler("booking_created")
+            def on_created(self, ctx):
+                """No event parameter."""
+                handler_log.append("created_no_event")
+
+            @handler("booking_confirmed")
+            def on_confirmed(self, ctx, event):
+                """With event parameter."""
+                handler_log.append(f"confirmed_with_event:{event.event_name}")
+
+        with time_machine() as tm:
+            booking = Booking.objects.create(
+                guest=self.guest,
+                checkin_date=timezone.now() + timedelta(days=1),
+                checkout_date=timezone.now() + timedelta(days=2),
+                status="confirmed",
+            )
+
+            self.assertIn("created_no_event", handler_log)
+            self.assertIn("confirmed_with_event:booking_confirmed", handler_log)
+
+
 if __name__ == "__main__":
     unittest.main()

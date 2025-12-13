@@ -19,11 +19,13 @@ class EventDefinition:
         condition: Optional[Callable[[models.Model], bool]] = None,
         namespace: Union[str, Callable[[models.Model], str]] = "*",
         trigger: Union[EventTrigger, List[EventTrigger]] = EventTrigger.CREATE,
+        watch_fields: Optional[List[str]] = None,
     ) -> None:
         self.name = name
         self.date_field = date_field  # None for immediate events
         self.condition = condition or (lambda instance: True)
         self._namespace = namespace
+        self.watch_fields = watch_fields
         # Normalize trigger to always be a list
         if isinstance(trigger, EventTrigger):
             self.triggers = [trigger]
@@ -57,3 +59,18 @@ class EventDefinition:
     def should_trigger(self, trigger: EventTrigger) -> bool:
         """Check if this event should fire for the given trigger"""
         return trigger in self.triggers
+
+    def get_watched_values(self, instance: models.Model) -> Optional[dict]:
+        """Get current values of watched fields from instance, None if no watch_fields"""
+        if not self.watch_fields:
+            return None
+        values = {}
+        for field in self.watch_fields:
+            value = getattr(instance, field, None)
+            # Convert to JSON-serializable format
+            if hasattr(value, 'pk'):
+                value = value.pk
+            elif hasattr(value, 'isoformat'):
+                value = value.isoformat()
+            values[field] = value
+        return values

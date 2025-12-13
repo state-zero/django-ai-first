@@ -224,3 +224,31 @@ class TestTriggerModel(models.Model):
             trigger=EventTrigger.DELETE,
         ),
     ]
+
+
+class TestWatchFieldsModel(models.Model):
+    """Test model for watch_fields behavior"""
+    name = models.CharField(max_length=100)
+    status = models.CharField(max_length=20, default="pending")
+    priority = models.IntegerField(default=0)
+    notes = models.TextField(blank=True)
+
+    events = [
+        # Fires on every update (no watch_fields - backwards compatible)
+        EventDefinition(
+            "any_update",
+            trigger=EventTrigger.UPDATE,
+        ),
+        # Only fires when status changes
+        EventDefinition(
+            "status_changed",
+            trigger=EventTrigger.UPDATE,
+            watch_fields=["status"],
+        ),
+        # Only fires when status OR priority changes
+        EventDefinition(
+            "important_fields_changed",
+            trigger=EventTrigger.UPDATE,
+            watch_fields=["status", "priority"],
+        ),
+    ]

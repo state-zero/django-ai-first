@@ -165,6 +165,9 @@ class EventManager(models.Manager):
         content_type = ContentType.objects.get_for_model(instance.__class__)
 
         for event_def in instance.__class__.events:
+            # Get current watched values (None if no watch_fields defined)
+            current_watched = event_def.get_watched_values(instance)
+
             # Always create event records (for tracking), but only fire based on trigger
             event, created = self.get_or_create(
                 model_type=content_type,
@@ -173,12 +176,27 @@ class EventManager(models.Manager):
                 namespace=event_def.get_namespace(instance)
             )
 
+            # Update watched_values snapshot on create
+            if created and current_watched is not None:
+                event.watched_values = current_watched
+                event.save(update_fields=["watched_values"])
+
             # Skip firing if this event doesn't match the current trigger
             if not event_def.should_trigger(trigger):
                 continue
 
-            # For UPDATE/DELETE triggers, reset to PENDING so it can fire again
+            # For UPDATE/DELETE triggers, handle watch_fields and reset to PENDING
             if trigger in (EventTrigger.UPDATE, EventTrigger.DELETE) and not created:
+                # If watch_fields defined, check if any watched values changed
+                if current_watched is not None:
+                    if event.watched_values == current_watched:
+                        # No change in watched fields, skip entirely
+                        continue
+                    # Values changed - update the snapshot
+                    event.watched_values = current_watched
+                    event.save(update_fields=["watched_values"])
+
+                # Reset to PENDING if already processed, so it can fire again
                 if event.status == EventStatus.PROCESSED:
                     event.status = EventStatus.PENDING
                     event.save(update_fields=["status"])
@@ -226,6 +244,12 @@ class Event(models.Model):
 
     event_created_at: datetime = models.DateTimeField(auto_now_add=True)
     event_updated_at: datetime = models.DateTimeField(auto_now=True)
+
+    watched_values = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Snapshot of watched field values for change detection",
+    )
 
     namespace = models.CharField(
         max_length=255,

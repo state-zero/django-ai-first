@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from ..events.models import Event, EventStatus
 from ..events.definitions import EventDefinition, EventTrigger
-from tests.models import TestBooking, TestOrder, TestProperty, TestModelWithoutEvents, TestUUIDModel, TestTriggerModel
+from tests.models import TestBooking, TestOrder, TestProperty, TestModelWithoutEvents, TestUUIDModel, TestTriggerModel, TestWatchFieldsModel, Guest, Booking
 
 class EventDefinitionTest(TestCase):
     """Test the EventDefinition helper class functionality"""
@@ -2052,3 +2052,248 @@ class EventClaimTest(TransactionTestCase):
         matching_claim = claims.find_matching_claim("booking_confirmed", booking)
         self.assertEqual(matching_claim.owner_class, "MockAgent2")
         self.assertEqual(matching_claim.priority, 10)
+
+
+class EventWatchFieldsTest(TransactionTestCase):
+    """Test the watch_fields functionality for UPDATE triggers"""
+
+    def setUp(self):
+        from django_ai.automation.events.callbacks import callback_registry
+        callback_registry.clear()
+
+    def tearDown(self):
+        from django_ai.automation.events.callbacks import callback_registry
+        callback_registry.clear()
+
+    def test_event_definition_watch_fields_parameter(self):
+        """Test EventDefinition accepts watch_fields parameter"""
+        event_def = EventDefinition(
+            "test_event",
+            trigger=EventTrigger.UPDATE,
+            watch_fields=["status", "priority"],
+        )
+        self.assertEqual(event_def.watch_fields, ["status", "priority"])
+
+    def test_event_definition_watch_fields_default_none(self):
+        """Test EventDefinition defaults watch_fields to None"""
+        event_def = EventDefinition("test_event", trigger=EventTrigger.UPDATE)
+        self.assertIsNone(event_def.watch_fields)
+
+    def test_get_watched_values_returns_none_without_watch_fields(self):
+        """Test get_watched_values returns None when no watch_fields defined"""
+        event_def = EventDefinition("test_event", trigger=EventTrigger.UPDATE)
+        instance = TestWatchFieldsModel(name="Test", status="pending", priority=1)
+        self.assertIsNone(event_def.get_watched_values(instance))
+
+    def test_get_watched_values_returns_dict(self):
+        """Test get_watched_values returns correct values"""
+        event_def = EventDefinition(
+            "test_event",
+            trigger=EventTrigger.UPDATE,
+            watch_fields=["status", "priority"],
+        )
+        instance = TestWatchFieldsModel(name="Test", status="active", priority=5)
+        values = event_def.get_watched_values(instance)
+        self.assertEqual(values, {"status": "active", "priority": 5})
+
+    def test_watched_values_stored_on_event_creation(self):
+        """Test that watched_values are stored on Event when created"""
+        instance = TestWatchFieldsModel.objects.create(
+            name="Test",
+            status="pending",
+            priority=1,
+        )
+
+        # Get the status_changed event (has watch_fields=["status"])
+        event = Event.objects.get(
+            model_type=ContentType.objects.get_for_model(TestWatchFieldsModel),
+            entity_id=str(instance.id),
+            event_name="status_changed",
+        )
+
+        self.assertEqual(event.watched_values, {"status": "pending"})
+
+    def test_update_without_watch_fields_fires_every_time(self):
+        """Test UPDATE trigger without watch_fields fires on every save"""
+        from django_ai.automation.events.callbacks import on_event
+
+        callback_log = []
+
+        @on_event(event_name="any_update")
+        def on_any_update(event):
+            callback_log.append(f"any_update:{event.entity_id}")
+
+        # Create instance
+        instance = TestWatchFieldsModel.objects.create(name="Test", status="pending")
+        self.assertEqual(len(callback_log), 0)  # UPDATE doesn't fire on CREATE
+
+        # First update - should fire
+        instance.notes = "updated notes"
+        instance.save()
+        self.assertEqual(len(callback_log), 1)
+
+        # Second update (same field) - should fire again
+        instance.notes = "more notes"
+        instance.save()
+        self.assertEqual(len(callback_log), 2)
+
+        # Third update (different field) - should fire again
+        instance.name = "New Name"
+        instance.save()
+        self.assertEqual(len(callback_log), 3)
+
+    def test_update_with_watch_fields_only_fires_on_change(self):
+        """Test UPDATE trigger with watch_fields only fires when watched field changes"""
+        from django_ai.automation.events.callbacks import on_event
+
+        callback_log = []
+
+        @on_event(event_name="status_changed")
+        def on_status_changed(event):
+            callback_log.append(f"status_changed:{event.entity_id}")
+
+        # Create instance
+        instance = TestWatchFieldsModel.objects.create(name="Test", status="pending")
+        self.assertEqual(len(callback_log), 0)  # UPDATE doesn't fire on CREATE
+
+        # Update non-watched field - should NOT fire
+        instance.notes = "some notes"
+        instance.save()
+        self.assertEqual(len(callback_log), 0, "Should not fire when non-watched field changes")
+
+        # Update watched field - should fire
+        instance.status = "active"
+        instance.save()
+        self.assertEqual(len(callback_log), 1, "Should fire when watched field changes")
+
+        # Update same watched field again - should fire
+        instance.status = "completed"
+        instance.save()
+        self.assertEqual(len(callback_log), 2, "Should fire when watched field changes again")
+
+        # Update without changing watched field value - should NOT fire
+        instance.notes = "different notes"
+        instance.save()
+        self.assertEqual(len(callback_log), 2, "Should not fire when watched field unchanged")
+
+    def test_update_with_multiple_watch_fields(self):
+        """Test UPDATE trigger fires when any of the watched fields change"""
+        from django_ai.automation.events.callbacks import on_event
+
+        callback_log = []
+
+        @on_event(event_name="important_fields_changed")
+        def on_important_change(event):
+            callback_log.append(f"important:{event.entity_id}")
+
+        # Create instance
+        instance = TestWatchFieldsModel.objects.create(
+            name="Test",
+            status="pending",
+            priority=0,
+        )
+        self.assertEqual(len(callback_log), 0)
+
+        # Update non-watched field - should NOT fire
+        instance.notes = "notes"
+        instance.save()
+        self.assertEqual(len(callback_log), 0)
+
+        # Update first watched field (status) - should fire
+        instance.status = "active"
+        instance.save()
+        self.assertEqual(len(callback_log), 1)
+
+        # Update second watched field (priority) - should fire
+        instance.priority = 5
+        instance.save()
+        self.assertEqual(len(callback_log), 2)
+
+        # Update both watched fields - should fire once
+        instance.status = "completed"
+        instance.priority = 10
+        instance.save()
+        self.assertEqual(len(callback_log), 3)
+
+    def test_watched_values_snapshot_updated_after_trigger(self):
+        """Test that watched_values snapshot is updated after event triggers"""
+        instance = TestWatchFieldsModel.objects.create(name="Test", status="pending")
+
+        # Get the event
+        event = Event.objects.get(
+            model_type=ContentType.objects.get_for_model(TestWatchFieldsModel),
+            entity_id=str(instance.id),
+            event_name="status_changed",
+        )
+        self.assertEqual(event.watched_values, {"status": "pending"})
+
+        # Update status
+        instance.status = "active"
+        instance.save()
+
+        # Refresh and check snapshot was updated
+        event.refresh_from_db()
+        self.assertEqual(event.watched_values, {"status": "active"})
+
+    def test_backward_compatibility_without_watch_fields(self):
+        """Test that events without watch_fields still work (backward compatible)"""
+        from django_ai.automation.events.callbacks import on_event
+
+        callback_log = []
+
+        @on_event(event_name="entity_modified")
+        def on_modified(event):
+            callback_log.append(f"modified:{event.entity_id}")
+
+        # Use TestTriggerModel which has UPDATE trigger without watch_fields
+        instance = TestTriggerModel.objects.create(name="Test", status="active")
+        self.assertEqual(len(callback_log), 0)
+
+        # Update - should fire (backward compatible behavior)
+        instance.name = "Updated"
+        instance.save()
+        self.assertEqual(len(callback_log), 1)
+
+        # Update again - should fire again
+        instance.name = "Updated Again"
+        instance.save()
+        self.assertEqual(len(callback_log), 2)
+
+    def test_watch_fields_with_foreign_key(self):
+        """Test watch_fields correctly handles FK fields (stores pk)"""
+        event_def = EventDefinition(
+            "test_event",
+            trigger=EventTrigger.UPDATE,
+            watch_fields=["guest"],
+        )
+
+        # Create a booking with guest
+        guest = Guest.objects.create(email="test@example.com", name="Test Guest")
+        booking = Booking.objects.create(
+            guest=guest,
+            checkin_date=timezone.now() + timedelta(days=1),
+            checkout_date=timezone.now() + timedelta(days=2),
+        )
+
+        values = event_def.get_watched_values(booking)
+        # FK should be stored as pk value
+        self.assertEqual(values, {"guest": guest.pk})
+
+    def test_watch_fields_with_datetime(self):
+        """Test watch_fields correctly handles datetime fields (stores isoformat)"""
+        event_def = EventDefinition(
+            "test_event",
+            trigger=EventTrigger.UPDATE,
+            watch_fields=["checkin_date"],
+        )
+
+        test_date = timezone.now()
+        booking = TestBooking(
+            guest_name="Test",
+            checkin_date=test_date,
+            checkout_date=test_date + timedelta(days=1),
+        )
+
+        values = event_def.get_watched_values(booking)
+        # Datetime should be stored as isoformat string
+        self.assertEqual(values, {"checkin_date": test_date.isoformat()})

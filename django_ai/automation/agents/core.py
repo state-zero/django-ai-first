@@ -1,3 +1,4 @@
+import inspect
 from datetime import timedelta
 from typing import Optional, List, Union, Callable, Dict, Any
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ from ..workflows.models import WorkflowRun, WorkflowStatus
 
 from .models import AgentRun, AgentStatus, HandlerExecution, HandlerStatus
 from ..events.callbacks import on_event, OffsetType
+from ..events.models import Event
 
 
 def _render_template(template_str: str, context_dict: dict) -> str:
@@ -643,13 +645,19 @@ class AgentEngine:
                 # Load context
                 context = agent_class.Context.model_validate(agent_run.context)
 
+                # Check if handler wants event parameter
+                sig = inspect.signature(handler_method)
+                handler_wants_event = 'event' in sig.parameters
+
+                # Fetch event if needed for condition check or handler parameter
+                event = None
+                if execution.event_id and (
+                    (handler_info and handler_info.condition) or handler_wants_event
+                ):
+                    event = Event.objects.filter(id=execution.event_id).first()
+
                 # Check condition if specified
                 if handler_info and handler_info.condition:
-                    event = None
-                    if execution.event_id:
-                        from ..events.models import Event
-                        event = Event.objects.filter(id=execution.event_id).first()
-
                     if not handler_info.condition(event, context):
                         execution.status = HandlerStatus.SKIPPED
                         execution.completed_at = timezone.now()
@@ -662,7 +670,10 @@ class AgentEngine:
                 print(f"[AGENT DEBUG] BEFORE handler {execution.handler_name}")
                 try:
                     with claims_context("agent", agent_class, agent_run.id):
-                        handler_method(context)
+                        if handler_wants_event:
+                            handler_method(context, event)
+                        else:
+                            handler_method(context)
 
                     # Save updated context
                     agent_run.context = context.model_dump()
