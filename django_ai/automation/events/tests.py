@@ -5,8 +5,8 @@ from django.db import connection
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from ..events.models import Event, EventStatus
-from ..events.definitions import EventDefinition
-from tests.models import TestBooking, TestOrder, TestProperty, TestModelWithoutEvents, TestUUIDModel
+from ..events.definitions import EventDefinition, EventTrigger
+from tests.models import TestBooking, TestOrder, TestProperty, TestModelWithoutEvents, TestUUIDModel, TestTriggerModel
 
 class EventDefinitionTest(TestCase):
     """Test the EventDefinition helper class functionality"""
@@ -1182,3 +1182,201 @@ class EventOffsetCallbackTest(TransactionTestCase):
             offset_values = set(p.offset for p in processed_offsets)
             self.assertIn(timedelta(minutes=30), offset_values)
             self.assertIn(timedelta(hours=1), offset_values)
+
+
+class EventTriggerTest(TransactionTestCase):
+    """Test EventTrigger functionality (CREATE, UPDATE, DELETE)"""
+
+    def setUp(self):
+        from django_ai.automation.events.callbacks import callback_registry
+        callback_registry.clear()
+
+    def tearDown(self):
+        from django_ai.automation.events.callbacks import callback_registry
+        callback_registry.clear()
+
+    def test_event_definition_trigger_default(self):
+        """Test that EventDefinition defaults to CREATE trigger"""
+        event_def = EventDefinition("test_event")
+        self.assertEqual(event_def.triggers, [EventTrigger.CREATE])
+
+    def test_event_definition_trigger_single(self):
+        """Test EventDefinition with single trigger"""
+        event_def = EventDefinition("test_event", trigger=EventTrigger.UPDATE)
+        self.assertEqual(event_def.triggers, [EventTrigger.UPDATE])
+
+    def test_event_definition_trigger_list(self):
+        """Test EventDefinition with list of triggers"""
+        event_def = EventDefinition(
+            "test_event",
+            trigger=[EventTrigger.CREATE, EventTrigger.UPDATE]
+        )
+        self.assertEqual(event_def.triggers, [EventTrigger.CREATE, EventTrigger.UPDATE])
+
+    def test_event_definition_trigger_invalid(self):
+        """Test EventDefinition raises error for invalid trigger"""
+        with self.assertRaises(ValueError):
+            EventDefinition("test_event", trigger="invalid")
+
+        with self.assertRaises(ValueError):
+            EventDefinition("test_event", trigger=["invalid"])
+
+    def test_should_trigger_method(self):
+        """Test the should_trigger method"""
+        create_only = EventDefinition("test", trigger=EventTrigger.CREATE)
+        update_only = EventDefinition("test", trigger=EventTrigger.UPDATE)
+        both = EventDefinition("test", trigger=[EventTrigger.CREATE, EventTrigger.UPDATE])
+
+        self.assertTrue(create_only.should_trigger(EventTrigger.CREATE))
+        self.assertFalse(create_only.should_trigger(EventTrigger.UPDATE))
+
+        self.assertFalse(update_only.should_trigger(EventTrigger.CREATE))
+        self.assertTrue(update_only.should_trigger(EventTrigger.UPDATE))
+
+        self.assertTrue(both.should_trigger(EventTrigger.CREATE))
+        self.assertTrue(both.should_trigger(EventTrigger.UPDATE))
+
+    def test_create_trigger_fires_only_on_creation(self):
+        """Test that CREATE trigger only fires on initial save"""
+        from django_ai.automation.events.callbacks import on_event
+
+        callback_log = []
+
+        @on_event(event_name="entity_created")
+        def on_created(event):
+            callback_log.append(f"created:{event.entity_id}")
+
+        # Create instance - should fire
+        instance = TestTriggerModel.objects.create(name="Test")
+
+        self.assertEqual(len(callback_log), 1)
+        self.assertIn(f"created:{instance.id}", callback_log)
+
+        # Update instance - should NOT fire again
+        callback_log.clear()
+        instance.name = "Updated"
+        instance.save()
+
+        self.assertEqual(len(callback_log), 0, "CREATE trigger should not fire on update")
+
+    def test_update_trigger_fires_only_on_updates(self):
+        """Test that UPDATE trigger only fires on subsequent saves"""
+        from django_ai.automation.events.callbacks import on_event
+
+        callback_log = []
+
+        @on_event(event_name="entity_modified")
+        def on_modified(event):
+            callback_log.append(f"modified:{event.entity_id}")
+
+        # Create instance - UPDATE trigger should NOT fire
+        instance = TestTriggerModel.objects.create(name="Test")
+        self.assertEqual(len(callback_log), 0, "UPDATE trigger should not fire on creation")
+
+        # Update instance - should fire
+        instance.name = "Updated"
+        instance.save()
+
+        self.assertEqual(len(callback_log), 1)
+        self.assertIn(f"modified:{instance.id}", callback_log)
+
+        # Update again - should fire again (repeatable)
+        callback_log.clear()
+        instance.name = "Updated Again"
+        instance.save()
+
+        self.assertEqual(len(callback_log), 1, "UPDATE trigger should fire on each update")
+
+    def test_combined_triggers_fire_on_both(self):
+        """Test that combined triggers fire on both create and update"""
+        from django_ai.automation.events.callbacks import on_event
+
+        callback_log = []
+
+        @on_event(event_name="entity_saved")
+        def on_saved(event):
+            callback_log.append(f"saved:{event.entity_id}")
+
+        # Create instance - should fire
+        instance = TestTriggerModel.objects.create(name="Test")
+        self.assertEqual(len(callback_log), 1)
+
+        # Update instance - should fire again
+        instance.name = "Updated"
+        instance.save()
+
+        self.assertEqual(len(callback_log), 2, "Combined trigger should fire on both create and update")
+
+    def test_delete_trigger_fires_on_deletion(self):
+        """Test that DELETE trigger fires when instance is deleted"""
+        from django_ai.automation.events.callbacks import on_event
+
+        callback_log = []
+
+        @on_event(event_name="entity_deleted")
+        def on_deleted(event):
+            callback_log.append(f"deleted:{event.entity_id}")
+
+        # Create instance
+        instance = TestTriggerModel.objects.create(name="Test")
+        instance_id = instance.id
+
+        self.assertEqual(len(callback_log), 0, "DELETE trigger should not fire on creation")
+
+        # Delete instance - should fire
+        instance.delete()
+
+        self.assertEqual(len(callback_log), 1)
+        self.assertIn(f"deleted:{instance_id}", callback_log)
+
+    def test_update_trigger_respects_condition(self):
+        """Test that UPDATE trigger respects condition on each update"""
+        from django_ai.automation.events.callbacks import on_event
+
+        callback_log = []
+
+        @on_event(event_name="entity_modified")
+        def on_modified(event):
+            callback_log.append(f"modified:{event.entity_id}")
+
+        # Create with active status
+        instance = TestTriggerModel.objects.create(name="Test", status="active")
+
+        # Update while active - should fire
+        instance.name = "Updated"
+        instance.save()
+        self.assertEqual(len(callback_log), 1)
+
+        # Change to inactive status - should NOT fire (condition fails)
+        callback_log.clear()
+        instance.status = "inactive"
+        instance.save()
+        self.assertEqual(len(callback_log), 0, "UPDATE trigger should not fire when condition fails")
+
+        # Change back to active and update - should fire
+        instance.status = "active"
+        instance.name = "Active Again"
+        instance.save()
+        self.assertEqual(len(callback_log), 1)
+
+    def test_backward_compatibility_default_trigger(self):
+        """Test that existing events without trigger param work (default to CREATE)"""
+        # TestBooking uses old-style EventDefinitions without trigger param
+        booking = TestBooking.objects.create(
+            guest_name="Test Guest",
+            checkin_date=timezone.now() + timedelta(days=1),
+            checkout_date=timezone.now() + timedelta(days=2),
+            status="confirmed",
+        )
+
+        # Events should be created
+        events = Event.objects.filter(
+            model_type=ContentType.objects.get_for_model(TestBooking),
+            entity_id=str(booking.id),
+        )
+        self.assertGreater(events.count(), 0)
+
+        # Immediate event should have fired (booking_confirmed)
+        booking_confirmed = events.filter(event_name="booking_confirmed").first()
+        self.assertIsNotNone(booking_confirmed)
+        self.assertEqual(booking_confirmed.status, EventStatus.PROCESSED)

@@ -3,6 +3,13 @@ from typing import List, Optional, Callable, Any, Union
 from datetime import datetime
 
 
+class EventTrigger(models.TextChoices):
+    """When an event should fire in the model lifecycle"""
+    CREATE = "create", "Create"   # Fire only on first save (default, backward compatible)
+    UPDATE = "update", "Update"   # Fire only on subsequent saves
+    DELETE = "delete", "Delete"   # Fire on deletion
+
+
 class EventDefinition:
 
     def __init__(
@@ -11,11 +18,21 @@ class EventDefinition:
         date_field: Optional[str] = None,
         condition: Optional[Callable[[models.Model], bool]] = None,
         namespace: Union[str, Callable[[models.Model], str]] = "*",
+        trigger: Union[EventTrigger, List[EventTrigger]] = EventTrigger.CREATE,
     ) -> None:
         self.name = name
         self.date_field = date_field  # None for immediate events
         self.condition = condition or (lambda instance: True)
         self._namespace = namespace
+        # Normalize trigger to always be a list
+        if isinstance(trigger, EventTrigger):
+            self.triggers = [trigger]
+        elif isinstance(trigger, list) and all(isinstance(t, EventTrigger) for t in trigger):
+            self.triggers = trigger
+        else:
+            raise ValueError(
+                f"trigger must be an EventTrigger or List[EventTrigger], got {type(trigger)}"
+            )
 
     def get_namespace(self, instance: models.Model) -> str:
         """Get the namespace for this event given a model instance"""
@@ -36,3 +53,7 @@ class EventDefinition:
     def is_immediate(self) -> bool:
         """Check if this is an immediate event (no date field)"""
         return self.date_field is None
+
+    def should_trigger(self, trigger: EventTrigger) -> bool:
+        """Check if this event should fire for the given trigger"""
+        return trigger in self.triggers

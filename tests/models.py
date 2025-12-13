@@ -4,7 +4,7 @@ from django.db import models
 import uuid
 
 from django.db import models
-from django_ai.automation.events.definitions import EventDefinition
+from django_ai.automation.events.definitions import EventDefinition, EventTrigger
 
 class ITImmediate(models.Model):
     flag = models.BooleanField(default=False)
@@ -183,5 +183,38 @@ class TestUUIDModel(models.Model):
         EventDefinition(
             "uuid_immediate_event",
             condition=lambda instance: instance.active,
+        ),
+    ]
+
+
+class TestTriggerModel(models.Model):
+    """Test model for trigger behavior (CREATE, UPDATE, DELETE)"""
+    name = models.CharField(max_length=100)
+    status = models.CharField(max_length=20, default="active")
+
+    events = [
+        # Only fires on creation
+        EventDefinition(
+            "entity_created",
+            condition=lambda instance: True,
+            trigger=EventTrigger.CREATE,
+        ),
+        # Only fires on updates (not creation)
+        EventDefinition(
+            "entity_modified",
+            condition=lambda instance: instance.status == "active",
+            trigger=EventTrigger.UPDATE,
+        ),
+        # Fires on both create and update
+        EventDefinition(
+            "entity_saved",
+            condition=lambda instance: True,
+            trigger=[EventTrigger.CREATE, EventTrigger.UPDATE],
+        ),
+        # Only fires on deletion
+        EventDefinition(
+            "entity_deleted",
+            condition=lambda instance: True,
+            trigger=EventTrigger.DELETE,
         ),
     ]

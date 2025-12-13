@@ -16,7 +16,7 @@ from django.apps import apps
 from django.contrib.contenttypes.models import ContentType
 from datetime import datetime
 from typing import List, Optional
-from .definitions import EventDefinition
+from .definitions import EventDefinition, EventTrigger
 from django.db import transaction
 import logging
 from collections import defaultdict
@@ -155,20 +155,33 @@ class EventManager(models.Manager):
         """Get events due within a specific date range (excludes immediate events)"""
         return self.get_events(from_date, to_date, status, include_immediate=False)
 
-    def update_for_instance(self, instance: models.Model) -> None:
-        """Create events for a specific model instance"""
+    def update_for_instance(
+        self, instance: models.Model, trigger: EventTrigger = EventTrigger.CREATE
+    ) -> None:
+        """Create/update events for a specific model instance based on trigger type"""
         if not hasattr(instance.__class__, "events"):
             return
 
         content_type = ContentType.objects.get_for_model(instance.__class__)
 
         for event_def in instance.__class__.events:
-            event, _created = self.get_or_create(
+            # Always create event records (for tracking), but only fire based on trigger
+            event, created = self.get_or_create(
                 model_type=content_type,
                 entity_id=str(instance.pk),
                 event_name=event_def.name,
                 namespace=event_def.get_namespace(instance)
             )
+
+            # Skip firing if this event doesn't match the current trigger
+            if not event_def.should_trigger(trigger):
+                continue
+
+            # For UPDATE/DELETE triggers, reset to PENDING so it can fire again
+            if trigger in (EventTrigger.UPDATE, EventTrigger.DELETE) and not created:
+                if event.status == EventStatus.PROCESSED:
+                    event.status = EventStatus.PENDING
+                    event.save(update_fields=["status"])
 
             # Fire immediate events right after the entity commit if valid & pending
             try:
@@ -177,21 +190,25 @@ class EventManager(models.Manager):
                     if event_def.should_create(instance):
                         event_id = event.pk
 
-                        def _mark_after_commit():
-                            try:
-                                # Use select_for_update to prevent race conditions
-                                ev = Event.objects.select_for_update().get(pk=event_id)
-                                # idempotent guard if something else processed it
-                                if ev.status == EventStatus.PENDING and ev.is_valid:
-                                    ev.mark_as_occurred()  # triggers OCCURRED callbacks
-                            except Event.DoesNotExist:
-                                pass
-                            except Exception as e:
-                                logger.error(
-                                    f"Failed to process immediate event {event_id}: {e}"
-                                )
+                        # For DELETE triggers, fire synchronously since entity will be gone after commit
+                        if trigger == EventTrigger.DELETE:
+                            event.mark_as_occurred()
+                        else:
+                            def _mark_after_commit():
+                                try:
+                                    # Use select_for_update to prevent race conditions
+                                    ev = Event.objects.select_for_update().get(pk=event_id)
+                                    # idempotent guard if something else processed it
+                                    if ev.status == EventStatus.PENDING and ev.is_valid:
+                                        ev.mark_as_occurred()  # triggers OCCURRED callbacks
+                                except Event.DoesNotExist:
+                                    pass
+                                except Exception as e:
+                                    logger.error(
+                                        f"Failed to process immediate event {event_id}: {e}"
+                                    )
 
-                        transaction.on_commit(_mark_after_commit)
+                            transaction.on_commit(_mark_after_commit)
             except Exception as e:
                 # Be conservative: never block the save flow because of callback firing
                 logger.warning(f"Error validating event {event.id}: {e}")
