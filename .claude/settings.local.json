@@ -6,7 +6,9 @@
       "Bash(mkdir:*)",
       "Bash(python -c:*)",
       "Bash(cat:*)",
-      "Bash(python manage.py shell:*)"
+      "Bash(python manage.py shell:*)",
+      "Bash(find:*)",
+      "Bash(python manage.py migrate:*)"
     ],
     "deny": [],
     "ask": []

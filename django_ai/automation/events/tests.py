@@ -1380,3 +1380,399 @@ class EventTriggerTest(TransactionTestCase):
         booking_confirmed = events.filter(event_name="booking_confirmed").first()
         self.assertIsNotNone(booking_confirmed)
         self.assertEqual(booking_confirmed.status, EventStatus.PROCESSED)
+
+
+class EventClaimTest(TransactionTestCase):
+    """Test the event claims system for flow control."""
+
+    def setUp(self):
+        from django_ai.automation.events.models import EventClaim
+        EventClaim.objects.all().delete()
+
+        self.booking = TestBooking.objects.create(
+            guest_name="Claim Test Guest",
+            checkin_date=timezone.now() + timedelta(days=1),
+            checkout_date=timezone.now() + timedelta(days=2),
+            status="confirmed",
+        )
+
+    def test_claim_creation_requires_context(self):
+        """Test that claims.hold() requires execution context"""
+        from django_ai.automation.events import claims
+
+        with self.assertRaises(RuntimeError) as ctx:
+            claims.hold("booking_confirmed", match={"guest_name": "Test"})
+
+        self.assertIn("must be called from within a handler", str(ctx.exception))
+
+    def test_claim_creation_with_context(self):
+        """Test creating a claim within execution context"""
+        from django_ai.automation.events import claims
+        from django_ai.automation.events.models import EventClaim
+
+        class MockAgent:
+            pass
+
+        with claims._context("agent", MockAgent, 123):
+            result = claims.hold("booking_confirmed", match={"guest_name": "Test Guest"})
+
+        # No bumped claim, so result should be None
+        self.assertIsNone(result)
+
+        # Verify claim was created
+        claim = EventClaim.objects.get(event_type="booking_confirmed")
+        self.assertEqual(claim.owner_type, "agent")
+        self.assertEqual(claim.owner_class, "MockAgent")
+        self.assertEqual(claim.owner_run_id, 123)
+        self.assertEqual(claim.match, {"guest_name": "Test Guest"})
+
+    def test_claim_with_time_expiry(self):
+        """Test claim with custom time-based expiry"""
+        from django_ai.automation.events import claims
+        from django_ai.automation.events.models import EventClaim
+
+        class MockAgent:
+            pass
+
+        with claims._context("agent", MockAgent, 123):
+            claims.hold(
+                "order_placed",
+                match={"status": "confirmed"},
+                expires_in=timedelta(hours=2)
+            )
+
+        claim = EventClaim.objects.get(event_type="order_placed")
+        self.assertIsNotNone(claim.expires_at)
+
+        # Verify expiry is approximately 2 hours from now
+        expected = timezone.now() + timedelta(hours=2)
+        self.assertAlmostEqual(
+            claim.expires_at.timestamp(),
+            expected.timestamp(),
+            delta=5  # 5 second tolerance
+        )
+
+    def test_claim_with_event_count_expiry(self):
+        """Test claim with event count expiry"""
+        from django_ai.automation.events import claims
+        from django_ai.automation.events.models import EventClaim
+
+        class MockAgent:
+            pass
+
+        with claims._context("agent", MockAgent, 123):
+            claims.hold(
+                "order_placed",
+                match={"status": "confirmed"},
+                expires_after_events=5
+            )
+
+        claim = EventClaim.objects.get(event_type="order_placed")
+        self.assertEqual(claim.max_events, 5)
+        self.assertEqual(claim.events_handled, 0)
+
+    def test_claim_is_expired_by_time(self):
+        """Test that is_expired property works for time expiry"""
+        from django_ai.automation.events import claims
+        from django_ai.automation.events.models import EventClaim
+
+        class MockAgent:
+            pass
+
+        with claims._context("agent", MockAgent, 123):
+            claims.hold(
+                "order_placed",
+                match={"status": "confirmed"},
+                expires_in=timedelta(seconds=-1)  # Already expired
+            )
+
+        claim = EventClaim.objects.get(event_type="order_placed")
+        self.assertTrue(claim.is_expired)
+
+    def test_claim_is_expired_by_event_count(self):
+        """Test that is_expired property works for event count expiry"""
+        from django_ai.automation.events import claims
+        from django_ai.automation.events.models import EventClaim
+
+        class MockAgent:
+            pass
+
+        with claims._context("agent", MockAgent, 123):
+            claims.hold(
+                "order_placed",
+                match={"status": "confirmed"},
+                expires_in=None,  # No time expiry
+                expires_after_events=2
+            )
+
+        claim = EventClaim.objects.get(event_type="order_placed")
+        self.assertFalse(claim.is_expired)
+
+        # Increment to max
+        claim.increment_events()
+        claim.increment_events()
+
+        self.assertTrue(claim.is_expired)
+
+    def test_claim_release(self):
+        """Test releasing a claim"""
+        from django_ai.automation.events import claims
+        from django_ai.automation.events.models import EventClaim
+
+        class MockAgent:
+            pass
+
+        with claims._context("agent", MockAgent, 123):
+            claims.hold("order_placed", match={"status": "confirmed"})
+            self.assertEqual(EventClaim.objects.count(), 1)
+
+            result = claims.release("order_placed", match={"status": "confirmed"})
+            self.assertTrue(result)
+            self.assertEqual(EventClaim.objects.count(), 0)
+
+    def test_release_nonexistent_claim(self):
+        """Test releasing a claim that doesn't exist"""
+        from django_ai.automation.events import claims
+
+        class MockAgent:
+            pass
+
+        with claims._context("agent", MockAgent, 123):
+            result = claims.release("order_placed", match={"status": "nonexistent"})
+            self.assertFalse(result)
+
+    def test_cannot_release_other_owners_claim(self):
+        """Test that you cannot release another owner's claim"""
+        from django_ai.automation.events import claims
+
+        class MockAgent1:
+            pass
+
+        class MockAgent2:
+            pass
+
+        # Agent 1 creates claim
+        with claims._context("agent", MockAgent1, 100):
+            claims.hold("order_placed", match={"status": "confirmed"})
+
+        # Agent 2 tries to release it
+        with claims._context("agent", MockAgent2, 200):
+            with self.assertRaises(ValueError) as ctx:
+                claims.release("order_placed", match={"status": "confirmed"})
+
+            self.assertIn("owned by MockAgent1", str(ctx.exception))
+
+    def test_release_all_for_owner(self):
+        """Test releasing all claims for an owner"""
+        from django_ai.automation.events import claims
+        from django_ai.automation.events.models import EventClaim
+
+        class MockAgent:
+            pass
+
+        with claims._context("agent", MockAgent, 123):
+            claims.hold("order_placed", match={"status": "confirmed"})
+            claims.hold("order_placed", match={"status": "pending"})
+            claims.hold("booking_confirmed", match={"guest_name": "Test"})
+
+        self.assertEqual(EventClaim.objects.count(), 3)
+
+        count = claims.release_all_for_owner("agent", 123)
+        self.assertEqual(count, 3)
+        self.assertEqual(EventClaim.objects.count(), 0)
+
+    def test_find_matching_claim(self):
+        """Test finding a claim that matches an entity"""
+        from django_ai.automation.events import claims
+        from django_ai.automation.events.models import EventClaim
+
+        class MockAgent:
+            pass
+
+        with claims._context("agent", MockAgent, 123):
+            claims.hold("booking_confirmed", match={"guest_name": "Claim Test Guest"})
+
+        # Find claim for our booking
+        matching_claim = claims.find_matching_claim("booking_confirmed", self.booking)
+        self.assertIsNotNone(matching_claim)
+        self.assertEqual(matching_claim.owner_class, "MockAgent")
+
+    def test_find_matching_claim_no_match(self):
+        """Test that find_matching_claim returns None when no claim matches"""
+        from django_ai.automation.events import claims
+
+        class MockAgent:
+            pass
+
+        with claims._context("agent", MockAgent, 123):
+            claims.hold("booking_confirmed", match={"guest_name": "Other Guest"})
+
+        # Our booking has guest_name="Claim Test Guest", not "Other Guest"
+        matching_claim = claims.find_matching_claim("booking_confirmed", self.booking)
+        self.assertIsNone(matching_claim)
+
+    def test_holder_function(self):
+        """Test the holder() function returns ClaimInfo"""
+        from django_ai.automation.events import claims
+
+        class MockAgent:
+            pass
+
+        with claims._context("agent", MockAgent, 123):
+            claims.hold("booking_confirmed", match={"guest_name": "Claim Test Guest"})
+
+        holder_info = claims.holder("booking_confirmed", self.booking)
+        self.assertIsNotNone(holder_info)
+        self.assertEqual(holder_info.owner_class, "MockAgent")
+        self.assertEqual(holder_info.owner_run_id, 123)
+        self.assertEqual(holder_info.event_type, "booking_confirmed")
+
+    def test_priority_based_claim_resolution(self):
+        """Test that higher priority claims win"""
+        from django_ai.automation.events import claims
+        from django_ai.automation.events.models import EventClaim
+
+        class MockAgent1:
+            pass
+
+        class MockAgent2:
+            pass
+
+        # Agent 1 creates claim with priority 10
+        with claims._context("agent", MockAgent1, 100):
+            claims.hold("booking_confirmed", match={"guest_name": "Claim Test Guest"}, priority=10)
+
+        # Agent 2 tries to create claim with lower priority - should fail
+        with claims._context("agent", MockAgent2, 200):
+            with self.assertRaises(ValueError) as ctx:
+                claims.hold("booking_confirmed", match={"guest_name": "Claim Test Guest"}, priority=5)
+
+            self.assertIn("priority", str(ctx.exception).lower())
+
+        # Agent 2 with higher priority can take over
+        with claims._context("agent", MockAgent2, 200):
+            bumped = claims.hold("booking_confirmed", match={"guest_name": "Claim Test Guest"}, priority=20)
+
+        # Should have bumped the original claim
+        self.assertIsNotNone(bumped)
+        self.assertEqual(bumped.owner_class, "MockAgent1")
+        self.assertEqual(bumped.owner_run_id, 100)
+
+        # New claim should be from Agent2
+        claim = EventClaim.objects.get(event_type="booking_confirmed")
+        self.assertEqual(claim.owner_class, "MockAgent2")
+        self.assertEqual(claim.owner_run_id, 200)
+
+    def test_bump_flag_forces_takeover(self):
+        """Test that bump=True forces claim takeover regardless of priority"""
+        from django_ai.automation.events import claims
+        from django_ai.automation.events.models import EventClaim
+
+        class MockAgent1:
+            pass
+
+        class MockAgent2:
+            pass
+
+        # Agent 1 creates claim with high priority
+        with claims._context("agent", MockAgent1, 100):
+            claims.hold("booking_confirmed", match={"guest_name": "Claim Test Guest"}, priority=100)
+
+        # Agent 2 with bump=True can take over despite lower priority
+        with claims._context("agent", MockAgent2, 200):
+            bumped = claims.hold(
+                "booking_confirmed",
+                match={"guest_name": "Claim Test Guest"},
+                priority=1,
+                bump=True
+            )
+
+        self.assertIsNotNone(bumped)
+        self.assertEqual(bumped.owner_class, "MockAgent1")
+
+        claim = EventClaim.objects.get(event_type="booking_confirmed")
+        self.assertEqual(claim.owner_class, "MockAgent2")
+
+    def test_claim_refresh_by_same_owner(self):
+        """Test that same owner can refresh their claim"""
+        from django_ai.automation.events import claims
+        from django_ai.automation.events.models import EventClaim
+
+        class MockAgent:
+            pass
+
+        with claims._context("agent", MockAgent, 123):
+            claims.hold(
+                "booking_confirmed",
+                match={"guest_name": "Claim Test Guest"},
+                priority=5,
+                expires_in=timedelta(hours=1)
+            )
+
+            original_expires = EventClaim.objects.get(event_type="booking_confirmed").expires_at
+
+            # Same owner refreshes claim with new settings
+            result = claims.hold(
+                "booking_confirmed",
+                match={"guest_name": "Claim Test Guest"},
+                priority=10,
+                expires_in=timedelta(hours=2)
+            )
+
+            # Should return None (no bump, just refresh)
+            self.assertIsNone(result)
+
+            # Claim should be updated
+            claim = EventClaim.objects.get(event_type="booking_confirmed")
+            self.assertEqual(claim.priority, 10)
+            self.assertGreater(claim.expires_at, original_expires)
+
+    def test_validate_match_catches_invalid_filter(self):
+        """Test that invalid match dict is caught at claim time"""
+        from django_ai.automation.events import claims
+
+        class MockAgent:
+            pass
+
+        with claims._context("agent", MockAgent, 123):
+            with self.assertRaises(ValueError) as ctx:
+                claims.hold(
+                    "booking_confirmed",
+                    match={"nonexistent_field__icontains": "test"}
+                )
+
+            self.assertIn("Invalid match filter", str(ctx.exception))
+
+    def test_expired_claim_is_replaced(self):
+        """Test that expired claims are automatically replaced"""
+        from django_ai.automation.events import claims
+        from django_ai.automation.events.models import EventClaim
+
+        class MockAgent1:
+            pass
+
+        class MockAgent2:
+            pass
+
+        # Agent 1 creates expired claim
+        with claims._context("agent", MockAgent1, 100):
+            claims.hold(
+                "booking_confirmed",
+                match={"guest_name": "Claim Test Guest"},
+                expires_in=timedelta(seconds=-10)  # Already expired
+            )
+
+        # Agent 2 should be able to take over without bump
+        with claims._context("agent", MockAgent2, 200):
+            result = claims.hold(
+                "booking_confirmed",
+                match={"guest_name": "Claim Test Guest"},
+                priority=1
+            )
+
+        # Should not report a bump (expired claim was just deleted)
+        self.assertIsNone(result)
+
+        # Claim should be from Agent2
+        claim = EventClaim.objects.get(event_type="booking_confirmed")
+        self.assertEqual(claim.owner_class, "MockAgent2")

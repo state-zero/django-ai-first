@@ -25,6 +25,7 @@ class HandlerInfo:
     offset: OffsetType = field(default_factory=timedelta)
     condition: Optional[Callable] = None
     retry: Optional[Retry] = None
+    ignores_claims: bool = False
 
 
 # Registry for agents and their handlers
@@ -37,6 +38,7 @@ def handler(
     offset: OffsetType = None,
     condition: Optional[Callable[[Any, Any], bool]] = None,
     retry: Optional[Retry] = None,
+    ignores_claims: bool = False,
 ):
     """
     Decorator to mark a method as an event handler within an agent.
@@ -47,6 +49,7 @@ def handler(
                Negative = before, positive = after.
         condition: Optional callable(event, ctx) -> bool to conditionally execute handler
         retry: Retry policy for this handler
+        ignores_claims: If True, handler runs regardless of event claims
 
     Example:
         @handler("move_in", offset=timedelta(days=-3))  # 3 days before
@@ -54,6 +57,11 @@ def handler(
         def send_pre_checkin_reminder(self, ctx: Context):
             send_message(ctx.guest_name, "Your stay is coming up!")
             ctx.reminder_sent = True
+
+        @handler("message_received", ignores_claims=True)
+        def audit_all_messages(self, ctx: Context):
+            # Always runs, even when another flow claims this event
+            pass
     """
     def decorator(func):
         func._is_handler = True
@@ -61,6 +69,7 @@ def handler(
         func._handler_offset = offset or timedelta()
         func._handler_condition = condition
         func._handler_retry = retry
+        func._handler_ignores_claims = ignores_claims
         return func
     return decorator
 
@@ -138,6 +147,7 @@ def agent(
                     offset=attr._handler_offset,
                     condition=attr._handler_condition,
                     retry=attr._handler_retry,
+                    ignores_claims=getattr(attr, "_handler_ignores_claims", False),
                 )
                 handlers.append(handler_info)
 
@@ -310,7 +320,7 @@ class AgentEngine:
         offset: OffsetType = None,
     ):
         """
-        Schedule a handler for execution, respecting offset timing.
+        Schedule a handler for execution, respecting offset timing and claims.
 
         For non-zero offset:
             - Negative offset: Schedule before event.at time
@@ -319,6 +329,10 @@ class AgentEngine:
         Offset can be timedelta or relativedelta for calendar-aware scheduling.
 
         If the scheduled time is in the past, executes immediately.
+
+        Claim checking:
+            - If event is claimed by another flow, handler is skipped
+            - Unless handler has ignores_claims=True
         """
         if offset is None:
             offset = timedelta()
@@ -343,6 +357,39 @@ class AgentEngine:
         if not agent_run:
             # No agent exists for this namespace - skip handler
             return None
+
+        # Find handler info for claim checking
+        handler_info = None
+        for h in agent_class._handlers:
+            if h.method_name == handler_name:
+                handler_info = h
+                break
+
+        # Check claims before scheduling
+        from ..events.claims import find_matching_claim
+
+        try:
+            entity = event.entity
+            matching_claim = find_matching_claim(event.event_name, entity)
+
+            if matching_claim:
+                # There's an active claim that matches this entity
+                if handler_info and not handler_info.ignores_claims:
+                    # Check if this agent run is the claim holder
+                    is_holder = (
+                        matching_claim.owner_type == "agent" and
+                        matching_claim.owner_class == agent_class.__name__ and
+                        matching_claim.owner_run_id == agent_run.id
+                    )
+                    if not is_holder:
+                        # Skip - claimed by someone else
+                        return None
+
+                    # We are the holder - increment events_handled
+                    matching_claim.increment_events()
+        except Exception:
+            # If entity is deleted or claim check fails, continue with scheduling
+            pass
 
         # Calculate scheduled time based on event.at and offset
         if hasattr(event, 'at') and event.at:
@@ -434,10 +481,12 @@ class AgentEngine:
                         execution.save()
                         return
 
-                # Execute handler
+                # Execute handler within claims context
+                from ..events.claims import _context as claims_context
                 print(f"[AGENT DEBUG] BEFORE handler {execution.handler_name}")
                 try:
-                    handler_method(context)
+                    with claims_context("agent", agent_class, agent_run.id):
+                        handler_method(context)
 
                     # Save updated context
                     agent_run.context = context.model_dump()
@@ -512,7 +561,12 @@ class AgentEngine:
         return _agent_handlers.get(agent_name, [])
 
     def complete_agent(self, agent_run: AgentRun) -> None:
-        """Mark an agent as completed."""
+        """Mark an agent as completed and release all claims."""
+        from ..events.claims import release_all_for_owner
+
+        # Release all claims held by this agent
+        release_all_for_owner("agent", agent_run.id)
+
         agent_run.status = AgentStatus.COMPLETED
         agent_run.save()
 

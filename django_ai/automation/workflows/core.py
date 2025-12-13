@@ -310,6 +310,7 @@ def event_workflow(
     offset: OffsetType = None,
     version: str = "1",
     default_retry: Optional[Retry] = None,
+    ignores_claims: bool = False,
 ):
     """
     Decorator for workflows triggered by events.
@@ -324,6 +325,7 @@ def event_workflow(
                  - relativedelta(months=-1): fires 1 month BEFORE event time
         version: Workflow version string
         default_retry: Default retry policy for steps
+        ignores_claims: If True, workflow runs regardless of event claims
     """
 
     def decorator(cls):
@@ -379,6 +381,7 @@ def event_workflow(
         cls._start_step = start_step
         cls._event_name = event_name
         cls._offset = offset
+        cls._ignores_claims = ignores_claims
 
         # Register in both places
         _workflows[workflow_name] = cls
@@ -523,15 +526,36 @@ class WorkflowEngine:
 
         workflows_started = []
 
+        # Check claims once for all workflows
+        from ..events.claims import find_matching_claim
+        matching_claim = None
+        try:
+            entity = event.entity
+            matching_claim = find_matching_claim(event.event_name, entity)
+        except Exception:
+            # If entity is deleted or claim check fails, continue without claim checking
+            pass
+
         for workflow_cls in _event_workflows[event.event_name]:
             # Check if workflow should run for this event
             if hasattr(workflow_cls, "should_run_for_event"):
                 if not workflow_cls.should_run_for_event(event):
                     continue
 
+            # Check claims before starting workflow
+            if matching_claim and not getattr(workflow_cls, "_ignores_claims", False):
+                # There's a claim - only start if the workflow would be the holder
+                # Event workflows can't be holders during startup, so skip
+                # (the claiming workflow must already exist)
+                continue
+
             try:
                 run = self.start_for_event(event, workflow_cls)
                 workflows_started.append(run)
+
+                # If there's a matching claim, increment events_handled
+                if matching_claim:
+                    matching_claim.increment_events()
             except Exception as e:
                 logger.error(
                     f"Failed to start workflow {workflow_cls._workflow_name} for event {event.id}: {e}",
@@ -549,6 +573,10 @@ class WorkflowEngine:
                 WorkflowStatus.WAITING,
                 WorkflowStatus.SUSPENDED,
             ]:
+                # Release all claims held by this workflow
+                from ..events.claims import release_all_for_owner
+                release_all_for_owner("workflow", run.id)
+
                 run.status = WorkflowStatus.CANCELLED
                 run.save()
         except WorkflowRun.DoesNotExist:
@@ -615,7 +643,10 @@ class WorkflowEngine:
                         error=child_run.error
                     )
 
-                result = step_method(**step_kwargs)
+                # Execute step within claims context
+                from ..events.claims import _context as claims_context
+                with claims_context("workflow", workflow_cls, run.id):
+                    result = step_method(**step_kwargs)
 
                 if not isinstance(result, StepResult):
                     raise ValueError(
@@ -782,6 +813,10 @@ class WorkflowEngine:
                 step_display=_build_step_display(workflow_cls, run.current_step)
             )
 
+            # Release all claims held by this workflow
+            from ..events.claims import release_all_for_owner
+            release_all_for_owner("workflow", run.id)
+
             run.status = WorkflowStatus.COMPLETED
             run.progress = 1.0
             if result.result:
@@ -796,7 +831,7 @@ class WorkflowEngine:
                 'display_title': result.display_title,
                 'display_subtitle': result.display_subtitle
             }
-            
+
             # Clear waiting display - used in the frontend only!
             run.waiting_display = {}
 
@@ -815,6 +850,10 @@ class WorkflowEngine:
                 error=result.reason,
                 step_display=_build_step_display(workflow_cls, run.current_step)
             )
+
+            # Release all claims held by this workflow
+            from ..events.claims import release_all_for_owner
+            release_all_for_owner("workflow", run.id)
 
             run.status = WorkflowStatus.FAILED
             run.error = result.reason
@@ -896,6 +935,10 @@ class WorkflowEngine:
             error=error_msg,
             step_display=_build_step_display(workflow_cls, step_name)
         )
+
+        # Release all claims held by this workflow
+        from ..events.claims import release_all_for_owner
+        release_all_for_owner("workflow", run.id)
 
         run.error = error_msg
         run.status = WorkflowStatus.FAILED

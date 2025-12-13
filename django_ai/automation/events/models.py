@@ -364,6 +364,70 @@ class ProcessedEventOffset(models.Model):
         return f"Processed {self.event.event_name} @ offset {self.offset}"
 
 
+class EventClaim(models.Model):
+    """
+    Tracks which flow (agent/workflow) has claimed an event type.
+
+    Claims use Django ORM filter syntax for matching - when an event fires,
+    the match dict is applied to the event's entity to determine if the claim
+    applies. Only the claim holder's handlers receive matching events
+    (unless handlers have ignores_claims=True).
+
+    Example:
+        EventClaim(
+            event_type="message_received",
+            match={"guest_id": 123},  # Django filter syntax
+            owner_type="agent",
+            owner_class="SupportFlow",
+            owner_run_id=456,
+        )
+    """
+    event_type = models.CharField(max_length=100)
+    match = models.JSONField()  # Django ORM filter syntax, e.g. {"guest_id": 123}
+
+    # Owner identification
+    owner_type = models.CharField(max_length=50)   # "agent" or "workflow"
+    owner_class = models.CharField(max_length=255)
+    owner_run_id = models.BigIntegerField()
+
+    # Claim properties
+    priority = models.IntegerField(default=0)
+
+    # Expiry - time-based
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    # Expiry - event-count-based
+    max_events = models.IntegerField(null=True, blank=True)
+    events_handled = models.IntegerField(default=0)
+
+    # Tracking
+    claimed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["event_type", "expires_at"]),
+            models.Index(fields=["owner_type", "owner_run_id"]),
+        ]
+
+    def __str__(self):
+        return f"{self.owner_class} claims {self.event_type} (match={self.match})"
+
+    @property
+    def is_expired(self):
+        from django.utils import timezone
+        if self.expires_at and timezone.now() > self.expires_at:
+            return True
+        if self.max_events is not None and self.events_handled >= self.max_events:
+            return True
+        return False
+
+    def increment_events(self):
+        """Call after successfully handling a claimed event."""
+        self.events_handled = models.F('events_handled') + 1
+        self.save(update_fields=["events_handled"])
+        self.refresh_from_db(fields=["events_handled"])
+
+
 class EventQuerySet(models.QuerySet):
 
     def with_entities(self):
