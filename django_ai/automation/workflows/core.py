@@ -294,10 +294,20 @@ def workflow(name: str, version: str = "1", default_retry: Optional[Retry] = Non
                 f"Workflow {name} must have exactly one step marked with start=True"
             )
 
+        # Find on_fail handler if defined
+        on_fail_handler = None
+        for attr_name in dir(cls):
+            attr = getattr(cls, attr_name)
+            if callable(attr) and getattr(attr, "_is_on_fail_handler", False):
+                if on_fail_handler is not None:
+                    raise ValueError(f"Workflow {name} has multiple @on_fail handlers")
+                on_fail_handler = attr_name
+
         cls._workflow_name = name
         cls._workflow_version = version
         cls._default_retry = default_retry or Retry()
         cls._start_step = start_step
+        cls._on_fail_handler = on_fail_handler
 
         _workflows[name] = cls
         return cls
@@ -372,6 +382,15 @@ def event_workflow(
         if start_step is None:
             raise ValueError(f"Event workflow must have a start step")
 
+        # Find on_fail handler if defined
+        on_fail_handler = None
+        for attr_name in dir(cls):
+            attr = getattr(cls, attr_name)
+            if callable(attr) and getattr(attr, "_is_on_fail_handler", False):
+                if on_fail_handler is not None:
+                    raise ValueError(f"Event workflow has multiple @on_fail handlers")
+                on_fail_handler = attr_name
+
         # Generate unique workflow name
         workflow_name = f"event:{event_name}:{offset}"
 
@@ -382,6 +401,7 @@ def event_workflow(
         cls._event_name = event_name
         cls._offset = offset
         cls._ignores_claims = ignores_claims
+        cls._on_fail_handler = on_fail_handler
 
         # Register in both places
         _workflows[workflow_name] = cls
@@ -420,6 +440,39 @@ def step(
         return func
 
     return decorator
+
+
+def on_fail(func):
+    """
+    Decorator to mark a method as the failure handler for a workflow.
+
+    The decorated method is called when the workflow fails (via Fail(),
+    exception with max retries, etc.). It receives the WorkflowRun instance
+    so it can inspect step history and perform compensation.
+
+    Example:
+        @workflow("order_processing")
+        class OrderWorkflow:
+            class Context(BaseModel):
+                charge_id: Optional[str] = None
+                reservation_id: Optional[str] = None
+
+            @on_fail
+            def cleanup(self, run: WorkflowRun):
+                # Check which steps completed
+                completed = set(
+                    run.step_executions.filter(status='completed')
+                    .values_list('step_name', flat=True)
+                )
+
+                ctx = get_context()
+                if 'charge_payment' in completed and ctx.charge_id:
+                    refund(ctx.charge_id)
+                if 'reserve_inventory' in completed and ctx.reservation_id:
+                    release_inventory(ctx.reservation_id)
+    """
+    func._is_on_fail_handler = True
+    return func
 
 # Main workflow engine
 class WorkflowEngine:
@@ -676,6 +729,45 @@ class WorkflowEngine:
             if token:
                 _current_context.reset(token)
 
+    def _call_on_fail_handler(self, run: WorkflowRun):
+        """
+        Call the workflow's @on_fail handler if one exists.
+
+        The handler receives the WorkflowRun so it can inspect step history
+        and perform compensation logic.
+        """
+        workflow_cls = _workflows.get(run.name)
+        if not workflow_cls:
+            return
+
+        on_fail_handler_name = getattr(workflow_cls, "_on_fail_handler", None)
+        if not on_fail_handler_name:
+            return
+
+        # Set up context so get_context() works inside the handler
+        ctx_manager = WorkflowContextManager(run.id, workflow_cls.Context)
+        token = _current_context.set(ctx_manager)
+
+        try:
+            workflow_instance = workflow_cls()
+            on_fail_method = getattr(workflow_instance, on_fail_handler_name)
+
+            # Execute within claims context
+            from ..events.claims import _context as claims_context
+            with claims_context("workflow", workflow_cls, run.id):
+                on_fail_method(run)
+
+            # Commit any context changes made by the handler
+            ctx_manager.commit_changes()
+        except Exception as e:
+            # Log but don't fail - the workflow is already failing
+            logger.error(
+                f"Error in @on_fail handler {on_fail_handler_name} for workflow {run.name}: {e}",
+                exc_info=True,
+            )
+        finally:
+            _current_context.reset(token)
+
     def _handle_result(self, run: WorkflowRun, result: StepResult):
         """Handle step execution results"""
         run.refresh_from_db()
@@ -851,6 +943,12 @@ class WorkflowEngine:
                 step_display=_build_step_display(workflow_cls, run.current_step)
             )
 
+            # Call on_fail handler before cleanup (may modify context)
+            self._call_on_fail_handler(run)
+
+            # Refresh to get any context changes made by on_fail handler
+            run.refresh_from_db()
+
             # Release all claims held by this workflow
             from ..events.claims import release_all_for_owner
             release_all_for_owner("workflow", run.id)
@@ -935,6 +1033,12 @@ class WorkflowEngine:
             error=error_msg,
             step_display=_build_step_display(workflow_cls, step_name)
         )
+
+        # Call on_fail handler before cleanup (may modify context)
+        self._call_on_fail_handler(run)
+
+        # Refresh to get any context changes made by on_fail handler
+        run.refresh_from_db()
 
         # Release all claims held by this workflow
         from ..events.claims import release_all_for_owner

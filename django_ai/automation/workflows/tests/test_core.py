@@ -16,6 +16,7 @@ from ..core import (
     get_context,
     WorkflowEngine,
     Retry,
+    on_fail,
 )
 from ..models import WorkflowRun, WorkflowStatus
 from ...testing import time_machine
@@ -389,6 +390,203 @@ class TestWorkflowStates(WorkflowTestCase):
         # Should be failed
         self.assertEqual(run.status, WorkflowStatus.FAILED)
         self.assertEqual(run.error, "Something went wrong")
+
+
+class TestOnFailHandler(WorkflowTestCase):
+    """Test @on_fail handler functionality"""
+
+    def test_on_fail_called_on_explicit_fail(self):
+        """Test that @on_fail handler is called when workflow fails via Fail()"""
+        on_fail_called = []
+
+        @workflow("test_on_fail_explicit")
+        class OnFailWorkflow:
+            class Context(BaseModel):
+                cleaned_up: bool = False
+
+            @step(start=True)
+            def failing_step(self):
+                return fail("Something went wrong")
+
+            @on_fail
+            def cleanup(self, run: WorkflowRun):
+                on_fail_called.append(run.id)
+                ctx = get_context()
+                ctx.cleaned_up = True
+
+        run = engine.start("test_on_fail_explicit")
+        engine.execute_step(run.id, "failing_step")
+        run.refresh_from_db()
+
+        self.assertEqual(run.status, WorkflowStatus.FAILED)
+        self.assertEqual(on_fail_called, [run.id])
+        self.assertTrue(run.data["cleaned_up"])
+
+    def test_on_fail_receives_workflow_run_with_step_history(self):
+        """Test that @on_fail handler receives WorkflowRun with step execution history"""
+        step_history = []
+
+        @workflow("test_on_fail_history")
+        class OnFailHistoryWorkflow:
+            class Context(BaseModel):
+                pass
+
+            @step(start=True)
+            def first_step(self):
+                return goto(self.second_step)
+
+            @step()
+            def second_step(self):
+                return goto(self.failing_step)
+
+            @step()
+            def failing_step(self):
+                return fail("Deliberate failure")
+
+            @on_fail
+            def cleanup(self, run: WorkflowRun):
+                # Capture step history from the run
+                completed_steps = list(
+                    run.step_executions.filter(status='completed')
+                    .values_list('step_name', flat=True)
+                )
+                step_history.extend(completed_steps)
+
+        run = engine.start("test_on_fail_history")
+
+        # Execute all steps
+        engine.execute_step(run.id, "first_step")
+        run.refresh_from_db()
+        engine.execute_step(run.id, "second_step")
+        run.refresh_from_db()
+        engine.execute_step(run.id, "failing_step")
+        run.refresh_from_db()
+
+        self.assertEqual(run.status, WorkflowStatus.FAILED)
+        self.assertIn("first_step", step_history)
+        self.assertIn("second_step", step_history)
+
+    def test_on_fail_has_access_to_context(self):
+        """Test that @on_fail handler can access and modify context via get_context()"""
+
+        @workflow("test_on_fail_context")
+        class OnFailContextWorkflow:
+            class Context(BaseModel):
+                value: str = "initial"
+                cleanup_value: str = ""
+
+            @step(start=True)
+            def update_and_fail(self):
+                ctx = get_context()
+                ctx.value = "updated"
+                return fail("Failure after update")
+
+            @on_fail
+            def cleanup(self, run: WorkflowRun):
+                ctx = get_context()
+                ctx.cleanup_value = f"cleaned_{ctx.value}"
+
+        run = engine.start("test_on_fail_context")
+        engine.execute_step(run.id, "update_and_fail")
+        run.refresh_from_db()
+
+        self.assertEqual(run.status, WorkflowStatus.FAILED)
+        self.assertEqual(run.data["value"], "updated")
+        self.assertEqual(run.data["cleanup_value"], "cleaned_updated")
+
+    def test_on_fail_called_on_max_retries_exhausted(self):
+        """Test that @on_fail handler is called when max retries are exhausted"""
+        on_fail_called = []
+
+        @workflow("test_on_fail_retries", default_retry=Retry(max_attempts=1))
+        class OnFailRetriesWorkflow:
+            class Context(BaseModel):
+                pass
+
+            @step(start=True)
+            def exploding_step(self):
+                raise ValueError("Boom!")
+
+            @on_fail
+            def cleanup(self, run: WorkflowRun):
+                on_fail_called.append(run.id)
+
+        run = engine.start("test_on_fail_retries")
+        engine.execute_step(run.id, "exploding_step")
+        run.refresh_from_db()
+
+        self.assertEqual(run.status, WorkflowStatus.FAILED)
+        self.assertEqual(on_fail_called, [run.id])
+
+    def test_workflow_without_on_fail_handler_works(self):
+        """Test that workflows without @on_fail handler still work correctly"""
+
+        @workflow("test_no_on_fail")
+        class NoOnFailWorkflow:
+            class Context(BaseModel):
+                pass
+
+            @step(start=True)
+            def failing_step(self):
+                return fail("Expected failure")
+
+        run = engine.start("test_no_on_fail")
+        engine.execute_step(run.id, "failing_step")
+        run.refresh_from_db()
+
+        self.assertEqual(run.status, WorkflowStatus.FAILED)
+        self.assertEqual(run.error, "Expected failure")
+
+    def test_multiple_on_fail_handlers_raises_error(self):
+        """Test that multiple @on_fail handlers raise a validation error"""
+
+        with self.assertRaises(ValueError) as cm:
+            @workflow("test_multi_on_fail")
+            class MultiOnFailWorkflow:
+                class Context(BaseModel):
+                    pass
+
+                @step(start=True)
+                def start_step(self):
+                    return complete()
+
+                @on_fail
+                def cleanup1(self, run: WorkflowRun):
+                    pass
+
+                @on_fail
+                def cleanup2(self, run: WorkflowRun):
+                    pass
+
+        self.assertIn("multiple @on_fail handlers", str(cm.exception))
+
+    def test_on_fail_error_does_not_affect_workflow_failure(self):
+        """Test that errors in @on_fail handler are logged but don't affect workflow"""
+        on_fail_called = []
+
+        @workflow("test_on_fail_error")
+        class OnFailErrorWorkflow:
+            class Context(BaseModel):
+                pass
+
+            @step(start=True)
+            def failing_step(self):
+                return fail("Original failure")
+
+            @on_fail
+            def buggy_cleanup(self, run: WorkflowRun):
+                on_fail_called.append(True)
+                raise RuntimeError("Cleanup exploded!")
+
+        run = engine.start("test_on_fail_error")
+        engine.execute_step(run.id, "failing_step")
+        run.refresh_from_db()
+
+        # Workflow should still be failed with original error
+        self.assertEqual(run.status, WorkflowStatus.FAILED)
+        self.assertEqual(run.error, "Original failure")
+        # But on_fail was still called
+        self.assertEqual(on_fail_called, [True])
 
 
 if __name__ == "__main__":

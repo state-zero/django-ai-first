@@ -641,6 +641,201 @@ def call_external_api(self):
 
 ---
 
+## Compensation (on_fail Handler)
+
+When a workflow fails, you may need to clean up or reverse actions that were already completed. The `@on_fail` decorator marks a method that runs when the workflow fails, giving you access to the workflow's step history to decide what compensation is needed.
+
+### Basic Usage
+
+```python
+from django_ai.automation.workflows.core import workflow, step, on_fail, get_context, fail, goto
+
+@workflow("order_processing")
+class OrderProcessingWorkflow:
+    class Context(BaseModel):
+        order_id: int
+        charge_id: Optional[str] = None
+        reservation_id: Optional[str] = None
+
+    @step(start=True)
+    def charge_payment(self):
+        ctx = get_context()
+        ctx.charge_id = payment_service.charge(ctx.order_id)
+        return goto(self.reserve_inventory)
+
+    @step()
+    def reserve_inventory(self):
+        ctx = get_context()
+        ctx.reservation_id = inventory_service.reserve(ctx.order_id)
+        return goto(self.ship_order)
+
+    @step()
+    def ship_order(self):
+        # This might fail!
+        shipping_service.ship(ctx.order_id)
+        return complete()
+
+    @on_fail
+    def cleanup(self, run: WorkflowRun):
+        """Called when workflow fails - inspect history and compensate."""
+        # See which steps completed
+        completed_steps = set(
+            run.step_executions.filter(status='completed')
+            .values_list('step_name', flat=True)
+        )
+
+        # Access context for IDs we need to reverse
+        ctx = get_context()
+
+        # Reverse completed actions
+        if 'charge_payment' in completed_steps and ctx.charge_id:
+            payment_service.refund(ctx.charge_id)
+
+        if 'reserve_inventory' in completed_steps and ctx.reservation_id:
+            inventory_service.release(ctx.reservation_id)
+```
+
+### When on_fail is Called
+
+The `@on_fail` handler runs in two scenarios:
+
+1. **Explicit failure**: When a step returns `fail("reason")`
+2. **Exception with max retries exhausted**: When a step throws an exception and all retry attempts have been used
+
+```python
+@step()
+def risky_step(self):
+    if something_wrong:
+        return fail("Validation failed")  # Triggers on_fail
+
+    raise ValueError("Boom!")  # Also triggers on_fail (after retries exhausted)
+```
+
+### Accessing Step History
+
+The `WorkflowRun` passed to `@on_fail` includes the full step execution history:
+
+```python
+@on_fail
+def cleanup(self, run: WorkflowRun):
+    # Get all completed steps
+    completed = run.step_executions.filter(status='completed')
+
+    for execution in completed:
+        print(f"Step: {execution.step_name}")
+        print(f"Completed at: {execution.created_at}")
+
+    # Get the failed step
+    failed = run.step_executions.filter(status='failed').first()
+    if failed:
+        print(f"Failed step: {failed.step_name}")
+        print(f"Error: {failed.error}")
+```
+
+### Modifying Context in on_fail
+
+You can modify the workflow context in the `@on_fail` handler - useful for recording cleanup actions:
+
+```python
+@on_fail
+def cleanup(self, run: WorkflowRun):
+    ctx = get_context()
+
+    # Track what we cleaned up
+    ctx.cleanup_performed = True
+    ctx.refunded = False
+
+    if ctx.charge_id:
+        payment_service.refund(ctx.charge_id)
+        ctx.refunded = True
+```
+
+### Error Handling in on_fail
+
+Errors in the `@on_fail` handler are logged but don't change the workflow's failure status - the original error is preserved:
+
+```python
+@on_fail
+def cleanup(self, run: WorkflowRun):
+    # If this raises, it's logged but workflow still shows original error
+    external_service.notify_failure(run.id)
+```
+
+### Rules and Limitations
+
+- **One handler per workflow**: Only one method can be decorated with `@on_fail`
+- **Not a step**: The `@on_fail` method is not a workflow step - don't use `@step()` on it
+- **Can't change outcome**: The workflow will still be marked as failed after `@on_fail` runs
+- **Runs synchronously**: The handler runs before the workflow is marked as failed in the database
+
+```python
+# This will raise an error at workflow registration time
+@workflow("bad_example")
+class BadWorkflow:
+    @on_fail
+    def cleanup1(self, run): pass
+
+    @on_fail
+    def cleanup2(self, run): pass  # Error: multiple @on_fail handlers
+```
+
+### Best Practices
+
+**1. Check what actually completed:**
+```python
+@on_fail
+def cleanup(self, run: WorkflowRun):
+    completed = set(
+        run.step_executions.filter(status='completed')
+        .values_list('step_name', flat=True)
+    )
+
+    # Only reverse what actually happened
+    if 'charge_payment' in completed:
+        self._refund_payment()
+```
+
+**2. Make compensation idempotent:**
+```python
+@on_fail
+def cleanup(self, run: WorkflowRun):
+    ctx = get_context()
+
+    # Safe to call multiple times
+    if ctx.charge_id and not ctx.already_refunded:
+        payment_service.refund(ctx.charge_id)
+        ctx.already_refunded = True
+```
+
+**3. Log compensation actions:**
+```python
+@on_fail
+def cleanup(self, run: WorkflowRun):
+    ctx = get_context()
+    logger.info(f"Running compensation for workflow {run.id}")
+
+    if ctx.charge_id:
+        logger.info(f"Refunding charge {ctx.charge_id}")
+        payment_service.refund(ctx.charge_id)
+```
+
+**4. Handle external service failures gracefully:**
+```python
+@on_fail
+def cleanup(self, run: WorkflowRun):
+    ctx = get_context()
+
+    try:
+        if ctx.charge_id:
+            payment_service.refund(ctx.charge_id)
+    except PaymentServiceError as e:
+        # Log but don't re-raise - manual intervention needed
+        logger.error(f"Failed to refund {ctx.charge_id}: {e}")
+        ctx.manual_refund_needed = True
+```
+
+---
+
 ## Event-Triggered Workflows
 
 ### Basic Event Workflow

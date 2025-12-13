@@ -2,6 +2,7 @@ from datetime import timedelta
 from typing import Optional, List, Union, Callable, Dict, Any
 from dataclasses import dataclass, field
 from pydantic import BaseModel
+from django.conf import settings
 from django.utils import timezone
 from django.db import transaction
 
@@ -16,6 +17,29 @@ from .models import AgentRun, AgentStatus, HandlerExecution, HandlerStatus
 from ..events.callbacks import on_event, OffsetType
 
 
+def _render_template(template_str: str, context_dict: dict) -> str:
+    """
+    Render a Django template string against context.
+
+    Context is available as 'ctx' in templates, e.g. "{{ ctx.booking_id }}".
+
+    Args:
+        template_str: Template like "{{ ctx.reservation_id }}" or "{{ ctx.priority|add:1 }}"
+        context_dict: The agent's context dict
+
+    Returns:
+        Rendered string value
+    """
+    from django.template import Template, Context
+    template = Template(template_str)
+    return template.render(Context({"ctx": context_dict})).strip()
+
+
+# Type for match dict values - template strings
+MatchValue = str
+MatchDict = Dict[str, MatchValue]
+
+
 # Handler metadata stored on decorated methods
 @dataclass
 class HandlerInfo:
@@ -26,11 +50,114 @@ class HandlerInfo:
     condition: Optional[Callable] = None
     retry: Optional[Retry] = None
     ignores_claims: bool = False
+    match: Optional[MatchDict] = None
 
 
 # Registry for agents and their handlers
 _agents: Dict[str, type] = {}
 _agent_handlers: Dict[str, List[HandlerInfo]] = {}  # agent_name -> list of handlers
+
+
+def _get_model_for_event_type(event_type: str) -> Optional[type]:
+    """
+    Find the model class that defines this event type.
+    """
+    from django.apps import apps
+    for model in apps.get_models():
+        events = getattr(model, "events", None)
+        if events:
+            for event_def in events:
+                if event_def.name == event_type:
+                    return model
+    return None
+
+
+def _matches_context(match: MatchDict, entity, context_dict: dict) -> bool:
+    """
+    Check if an entity matches an agent's context based on match templates.
+
+    Uses ORM query to validate the match, supporting Django's __ lookup syntax.
+
+    Args:
+        match: Dict of {entity_field: "{{ context_template }}"}
+        entity: The event's entity instance
+        context_dict: The agent's context as a dict
+
+    Returns:
+        True if all match conditions are satisfied
+    """
+    # Build ORM filter: {entity_field: rendered_context_value}
+    filter_kwargs = {}
+    for entity_field, template_str in match.items():
+        rendered = _render_template(template_str, context_dict)
+        # Convert to appropriate type if it looks like a number
+        try:
+            if rendered.isdigit():
+                rendered = int(rendered)
+        except (AttributeError, ValueError):
+            pass
+        filter_kwargs[entity_field] = rendered
+
+    # Query: does this entity match the filter?
+    model_class = entity.__class__
+    try:
+        return model_class.objects.filter(pk=entity.pk, **filter_kwargs).exists()
+    except Exception:
+        # Invalid filter - doesn't match
+        return False
+
+
+def _generate_namespace(match: MatchDict, context) -> str:
+    """
+    Generate a namespace string from match dict and context.
+
+    Used for display and backward compatibility.
+    """
+    context_dict = context.model_dump() if hasattr(context, 'model_dump') else dict(context)
+
+    parts = []
+    for entity_field, template_str in sorted(match.items()):
+        rendered = _render_template(template_str, context_dict)
+        if rendered:
+            parts.append(f"{entity_field}:{rendered}")
+
+    return ",".join(parts) if parts else "*"
+
+
+def _validate_match(event_type: str, match: MatchDict) -> None:
+    """
+    Validate that match dict references valid entity fields.
+
+    Only runs in DEBUG mode to catch typos during development.
+    Builds a test query to verify field names are valid.
+
+    Args:
+        event_type: Event name to find the entity model
+        match: Dict of {entity_field: context_ref}
+
+    Raises:
+        ValueError: If entity field doesn't exist on the model
+    """
+    if not getattr(settings, 'DEBUG', False):
+        return
+
+    model = _get_model_for_event_type(event_type)
+    if model is None:
+        # Can't validate unknown event types
+        return
+
+    # Build a test filter to validate entity field paths
+    entity_fields = list(match.keys())
+    test_filter = {field: None for field in entity_fields}
+
+    try:
+        # Just build the query - don't execute it
+        model.objects.filter(**test_filter).query
+    except Exception as e:
+        raise ValueError(
+            f"Invalid match for event '{event_type}': {e}. "
+            f"Check that fields {entity_fields} exist on {model.__name__}."
+        ) from e
 
 
 def handler(
@@ -39,6 +166,7 @@ def handler(
     condition: Optional[Callable[[Any, Any], bool]] = None,
     retry: Optional[Retry] = None,
     ignores_claims: bool = False,
+    match: Optional[MatchDict] = None,
 ):
     """
     Decorator to mark a method as an event handler within an agent.
@@ -50,26 +178,40 @@ def handler(
         condition: Optional callable(event, ctx) -> bool to conditionally execute handler
         retry: Retry policy for this handler
         ignores_claims: If True, handler runs regardless of event claims
+        match: Dict mapping entity fields to context fields for routing.
+               Format: {entity_field: ctx.context_field}
+               Supports Django __ syntax for nested fields.
 
     Example:
-        @handler("move_in", offset=timedelta(days=-3))  # 3 days before
-        @handler("move_in", offset=relativedelta(months=-1))  # 1 month before
-        def send_pre_checkin_reminder(self, ctx: Context):
-            send_message(ctx.guest_name, "Your stay is coming up!")
-            ctx.reminder_sent = True
+        from django_ai.automation.agents import handler, ctx
 
-        @handler("message_received", ignores_claims=True)
-        def audit_all_messages(self, ctx: Context):
+        @handler("move_in", offset=timedelta(days=-3))  # 3 days before
+        def send_pre_checkin_reminder(self, context):
+            send_message(context.guest_name, "Your stay is coming up!")
+            context.reminder_sent = True
+
+        @handler("message_received", match={"sender_id": ctx.guest_id})
+        def handle_message(self, context):
+            # Routes messages where entity.sender_id == context.guest_id
+            pass
+
+        @handler("audit_event", ignores_claims=True)
+        def audit_all(self, context):
             # Always runs, even when another flow claims this event
             pass
     """
     def decorator(func):
+        # Validate match in debug mode
+        if match:
+            _validate_match(event_name, match)
+
         func._is_handler = True
         func._handler_event_name = event_name
         func._handler_offset = offset or timedelta()
         func._handler_condition = condition
         func._handler_retry = retry
         func._handler_ignores_claims = ignores_claims
+        func._handler_match = match
         return func
     return decorator
 
@@ -77,6 +219,7 @@ def handler(
 def agent(
     name: str,
     spawn_on: str,
+    match: Optional[MatchDict] = None,
     singleton: bool = True,
 ):
     """
@@ -85,40 +228,50 @@ def agent(
     Args:
         name: Unique agent name (e.g., "reservation_journey")
         spawn_on: Event that creates a new agent instance (required)
-        singleton: If True (default), only one agent per namespace. If another spawn_on
-                   event fires for an existing namespace, no new agent is created.
+        match: Dict for finding existing agent instances.
+               Format: {entity_field: ctx.context_field}
+               Supports Django __ syntax for nested fields.
+               Used for singleton checks and event routing.
+        singleton: If True (default), only one agent per context match.
 
     Required class members:
         - Context: Pydantic BaseModel defining agent state
-        - get_namespace(self, event) -> str: Returns namespace string for scoping
         - create_context(cls, event) -> Context: Classmethod to create initial context
 
     Optional:
         - @handler methods: Event handlers with optional offsets and conditions
 
     Example:
-        @agent("reservation_journey", spawn_on="reservation_created")
+        from django_ai.automation.agents import agent, handler, ctx
+
+        @agent(
+            "reservation_journey",
+            spawn_on="reservation_created",
+            match={"id": ctx.reservation_id}
+        )
         class ReservationJourney:
             class Context(BaseModel):
                 reservation_id: int
-                guest_name: str
+                guest_id: int
                 reminder_sent: bool = False
-
-            def get_namespace(self, event):
-                return f"reservation:{event.entity.id}"
 
             @classmethod
             def create_context(cls, event):
                 reservation = event.entity
                 return cls.Context(
                     reservation_id=reservation.id,
-                    guest_name=reservation.guest.name,
+                    guest_id=reservation.guest_id,
                 )
 
-            @handler("move_in", offset=timedelta(hours=-3))
-            def send_reminder(self, ctx: Context):
-                send_message(ctx.guest_name, "Check-in soon!")
-                ctx.reminder_sent = True
+            @handler("move_in")
+            def send_reminder(self, context):
+                send_message(context.guest_name, "Check-in soon!")
+                context.reminder_sent = True
+
+            @handler("message_received", match={"sender_id": ctx.guest_id})
+            def handle_message(self, context):
+                # Different entity type - need explicit match to find agent
+                pass
     """
     def decorator(cls):
         # Validate required members
@@ -126,15 +279,18 @@ def agent(
             raise ValueError(f"Agent {name} must define a Context class")
         if not issubclass(cls.Context, BaseModel):
             raise ValueError(f"Agent {name}.Context must inherit from BaseModel")
-        if not hasattr(cls, "get_namespace"):
-            raise ValueError(f"Agent {name} must have a 'get_namespace' method")
         if not hasattr(cls, "create_context"):
             raise ValueError(f"Agent {name} must have a 'create_context' classmethod")
+
+        # Validate match in debug mode
+        if match:
+            _validate_match(spawn_on, match)
 
         # Store agent metadata
         cls._agent_name = name
         cls._spawn_on = spawn_on
         cls._singleton = singleton
+        cls._default_match = match
 
         # Collect all handler methods
         handlers = []
@@ -148,6 +304,7 @@ def agent(
                     condition=attr._handler_condition,
                     retry=attr._handler_retry,
                     ignores_claims=getattr(attr, "_handler_ignores_claims", False),
+                    match=getattr(attr, "_handler_match", None),
                 )
                 handlers.append(handler_info)
 
@@ -176,6 +333,32 @@ def agent(
     return decorator
 
 
+def _find_matching_agent(agent_name: str, match_spec: MatchDict, entity) -> Optional[AgentRun]:
+    """
+    Find an active agent that matches the given entity based on match templates.
+
+    Args:
+        agent_name: Name of the agent
+        match_spec: Dict of {entity_field: "{{ context_template }}"}
+        entity: The event's entity instance
+
+    Returns:
+        Matching AgentRun or None
+    """
+    # Get all active agents for this agent_name
+    candidates = AgentRun.objects.filter(
+        agent_name=agent_name,
+        status=AgentStatus.ACTIVE,
+    )
+
+    # Post-filter by matching context
+    for agent_run in candidates:
+        if _matches_context(match_spec, entity, agent_run.context):
+            return agent_run
+
+    return None
+
+
 def _register_spawn_handler(
     agent_name: str,
     event_name: str,
@@ -186,34 +369,31 @@ def _register_spawn_handler(
 
     @on_event(event_name=event_name, namespace="*")
     def handle_spawn_event(event):
-        # Compute namespace for this event
-        temp_agent = agent_class()
-        namespace = temp_agent.get_namespace(event)
+        # Create context first - we need it for singleton check and creation
+        context = agent_class.create_context(event)
+        context_data = context.model_dump()
 
-        if namespace is None:
-            namespace = "*"
+        # Get the match spec (default match for spawn event)
+        match_spec = agent_class._default_match
 
-        # Check singleton constraint
-        if singleton:
-            existing = AgentRun.objects.filter(
-                agent_name=agent_name,
-                namespace=namespace,
-                status=AgentStatus.ACTIVE,
-            ).first()
+        # Check singleton constraint using match-based lookup
+        if singleton and match_spec:
+            existing = _find_matching_agent(agent_name, match_spec, event.entity)
 
             if existing:
-                # Agent already exists for this namespace, skip spawn
+                # Agent already exists for this context match, skip spawn
                 return
 
-        # Create new agent run
-        context = agent_class.create_context(event)
+        # Generate namespace for display/compatibility
+        namespace = _generate_namespace(match_spec, context) if match_spec else "*"
 
+        # Create new agent run
         agent_run = AgentRun.objects.create(
             agent_name=agent_name,
             namespace=namespace,
             entity_type_id=event.model_type_id,
             entity_id=str(event.entity_id),
-            context=context.model_dump(),
+            context=context_data,
             status=AgentStatus.ACTIVE,
         )
 
@@ -283,32 +463,30 @@ class AgentEngine:
             raise ValueError(f"Agent {agent_name} not found")
 
         agent_class = _agents[agent_name]
-        temp_agent = agent_class()
-        namespace = temp_agent.get_namespace(event)
 
-        if namespace is None:
-            namespace = "*"
+        # Create context first - we need it for singleton check
+        context = agent_class.create_context(event)
+        context_data = context.model_dump()
 
-        # Check singleton constraint
-        if agent_class._singleton:
-            existing = AgentRun.objects.filter(
-                agent_name=agent_name,
-                namespace=namespace,
-                status=AgentStatus.ACTIVE,
-            ).first()
+        # Get match spec
+        match_spec = agent_class._default_match
+
+        # Check singleton constraint using match-based lookup
+        if agent_class._singleton and match_spec:
+            existing = _find_matching_agent(agent_name, match_spec, event.entity)
 
             if existing:
                 return None
 
-        # Create new agent run
-        context = agent_class.create_context(event)
+        # Generate namespace for display
+        namespace = _generate_namespace(match_spec, context) if match_spec else "*"
 
         return AgentRun.objects.create(
             agent_name=agent_name,
             namespace=namespace,
             entity_type_id=event.model_type_id,
             entity_id=str(event.entity_id),
-            context=context.model_dump(),
+            context=context_data,
             status=AgentStatus.ACTIVE,
         )
 
@@ -341,29 +519,27 @@ class AgentEngine:
             raise ValueError(f"Agent {agent_name} not found")
 
         agent_class = _agents[agent_name]
-        temp_agent = agent_class()
-        namespace = temp_agent.get_namespace(event)
 
-        if namespace is None:
-            namespace = "*"
-
-        # Look up existing agent for this namespace
-        agent_run = AgentRun.objects.filter(
-            agent_name=agent_name,
-            namespace=namespace,
-            status=AgentStatus.ACTIVE,
-        ).first()
-
-        if not agent_run:
-            # No agent exists for this namespace - skip handler
-            return None
-
-        # Find handler info for claim checking
+        # Find handler info first - we need it for match spec
         handler_info = None
         for h in agent_class._handlers:
             if h.method_name == handler_name:
                 handler_info = h
                 break
+
+        # Get match spec: handler override > agent default
+        match_spec = (handler_info.match if handler_info else None) or agent_class._default_match
+
+        if not match_spec:
+            # No match spec - can't route this event
+            return None
+
+        # Find matching agent using post-filtering
+        agent_run = _find_matching_agent(agent_name, match_spec, event.entity)
+
+        if not agent_run:
+            # No agent exists for this match - skip handler
+            return None
 
         # Check claims before scheduling
         from ..events.claims import find_matching_claim
@@ -602,7 +778,7 @@ class AgentManager:
         Args:
             agent_name: Name of the registered agent
             event: Optional event to initialize from
-            namespace: Optional explicit namespace (overrides get_namespace)
+            namespace: Optional explicit namespace (for display only)
             **context_kwargs: Additional context fields
 
         Returns:
@@ -612,24 +788,6 @@ class AgentManager:
             raise ValueError(f"Agent {agent_name} not found")
 
         agent_class = _agents[agent_name]
-
-        # Determine namespace
-        if namespace is None and event:
-            temp_agent = agent_class()
-            namespace = temp_agent.get_namespace(event)
-        if namespace is None:
-            namespace = "*"
-
-        # Check singleton constraint
-        if agent_class._singleton:
-            existing = AgentRun.objects.filter(
-                agent_name=agent_name,
-                namespace=namespace,
-                status=AgentStatus.ACTIVE,
-            ).first()
-
-            if existing:
-                return None
 
         # Create context
         if event:
@@ -641,12 +799,28 @@ class AgentManager:
         else:
             context = agent_class.Context(**context_kwargs)
 
+        context_data = context.model_dump()
+
+        # Get match spec
+        match_spec = agent_class._default_match
+
+        # Check singleton constraint using match-based lookup
+        if agent_class._singleton and match_spec and event:
+            existing = _find_matching_agent(agent_name, match_spec, event.entity)
+
+            if existing:
+                return None
+
+        # Generate namespace for display if not provided
+        if namespace is None:
+            namespace = _generate_namespace(match_spec, context) if match_spec else "*"
+
         return AgentRun.objects.create(
             agent_name=agent_name,
             namespace=namespace,
-            entity_type_id=None,
-            entity_id="",
-            context=context.model_dump(),
+            entity_type_id=event.model_type_id if event else None,
+            entity_id=str(event.entity_id) if event else "",
+            context=context_data,
             status=AgentStatus.ACTIVE,
         )
 

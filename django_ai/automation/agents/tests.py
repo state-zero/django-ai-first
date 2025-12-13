@@ -46,43 +46,22 @@ class DecoratorValidationTests(TestCase):
         """Test that agent decorator validates Context class"""
         with self.assertRaises(ValueError) as cm:
 
-            @agent("test_agent", spawn_on="booking_created")
+            @agent("test_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
             class BadAgent:
-                def get_namespace(self, event):
-                    return "test"
-
                 @classmethod
                 def create_context(cls, event):
                     return {}
 
         self.assertIn("Context", str(cm.exception))
 
-    def test_agent_decorator_requires_get_namespace(self):
-        """Test that agent decorator validates get_namespace method"""
-        with self.assertRaises(ValueError) as cm:
-
-            @agent("test_agent", spawn_on="booking_created")
-            class BadAgent:
-                class Context(BaseModel):
-                    pass
-
-                @classmethod
-                def create_context(cls, event):
-                    return cls.Context()
-
-        self.assertIn("get_namespace", str(cm.exception))
-
     def test_agent_decorator_requires_create_context(self):
         """Test that agent decorator validates create_context method"""
         with self.assertRaises(ValueError) as cm:
 
-            @agent("test_agent", spawn_on="booking_created")
+            @agent("test_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
             class BadAgent:
                 class Context(BaseModel):
                     pass
-
-                def get_namespace(self, event):
-                    return "test"
 
         self.assertIn("create_context", str(cm.exception))
 
@@ -112,17 +91,14 @@ class DecoratorValidationTests(TestCase):
     def test_agent_registers_globally(self):
         """Test that agent decorator registers agent globally"""
 
-        @agent("my_agent", spawn_on="booking_created")
+        @agent("my_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
         class MyAgent:
             class Context(BaseModel):
-                value: int = 0
-
-            def get_namespace(self, event):
-                return "test"
+                booking_id: int = 0
 
             @classmethod
             def create_context(cls, event):
-                return cls.Context()
+                return cls.Context(booking_id=event.entity.id)
 
         self.assertIn("my_agent", _agents)
         self.assertEqual(_agents["my_agent"], MyAgent)
@@ -130,17 +106,14 @@ class DecoratorValidationTests(TestCase):
     def test_agent_collects_handlers(self):
         """Test that agent decorator collects all handler methods"""
 
-        @agent("collector_agent", spawn_on="booking_created")
+        @agent("collector_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
         class CollectorAgent:
             class Context(BaseModel):
-                pass
-
-            def get_namespace(self, event):
-                return "test"
+                booking_id: int = 0
 
             @classmethod
             def create_context(cls, event):
-                return cls.Context()
+                return cls.Context(booking_id=event.entity.id)
 
             @handler("move_in", offset=timedelta(minutes=-180))
             def handler_one(self, ctx):
@@ -192,13 +165,10 @@ class AgentIntegrationTests(TransactionTestCase):
     def test_agent_spawn_via_immediate_event(self):
         """Agent spawns when spawn_on event occurs."""
 
-        @agent("spawn_test_agent", spawn_on="booking_created")
+        @agent("spawn_test_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
         class SpawnTestAgent:
             class Context(BaseModel):
                 booking_id: int = 0
-
-            def get_namespace(self, event):
-                return f"booking:{event.entity.id}"
 
             @classmethod
             def create_context(cls, event):
@@ -213,10 +183,10 @@ class AgentIntegrationTests(TransactionTestCase):
                 status="pending",
             )
 
-            # Agent should have been created
+            # Agent should have been created (namespace is auto-generated from match)
             agent_run = AgentRun.objects.filter(
                 agent_name="spawn_test_agent",
-                namespace=f"booking:{booking.id}",
+                context__booking_id=booking.id,
             ).first()
 
             self.assertIsNotNone(agent_run)
@@ -224,19 +194,17 @@ class AgentIntegrationTests(TransactionTestCase):
             self.assertEqual(agent_run.context["booking_id"], booking.id)
 
     def test_singleton_prevents_duplicate_spawn(self):
-        """singleton=True prevents duplicate agents for same namespace."""
+        """singleton=True prevents duplicate agents for same match."""
 
-        @agent("singleton_agent", spawn_on="booking_created", singleton=True)
+        @agent("singleton_agent", spawn_on="booking_created", match={"guest_id": "{{ ctx.guest_id }}"}, singleton=True)
         class SingletonAgent:
             class Context(BaseModel):
+                guest_id: int = 0
                 spawn_count: int = 0
-
-            def get_namespace(self, event):
-                return "shared_namespace"
 
             @classmethod
             def create_context(cls, event):
-                return cls.Context(spawn_count=1)
+                return cls.Context(guest_id=event.entity.guest_id, spawn_count=1)
 
         with time_machine() as tm:
             # Create first booking
@@ -247,7 +215,7 @@ class AgentIntegrationTests(TransactionTestCase):
                 status="pending",
             )
 
-            # Create second booking (should not create new agent)
+            # Create second booking for same guest (should not create new agent)
             Booking.objects.create(
                 guest=self.guest,
                 checkin_date=timezone.now() + timedelta(days=3),
@@ -255,10 +223,10 @@ class AgentIntegrationTests(TransactionTestCase):
                 status="pending",
             )
 
-            # Should only have one active agent
+            # Should only have one active agent for this guest
             active_agents = AgentRun.objects.filter(
                 agent_name="singleton_agent",
-                namespace="shared_namespace",
+                context__guest_id=self.guest.id,
                 status=AgentStatus.ACTIVE,
             )
             self.assertEqual(active_agents.count(), 1)
@@ -267,17 +235,15 @@ class AgentIntegrationTests(TransactionTestCase):
         """Handler executes when its event fires."""
         handler_log = []
 
-        @agent("handler_exec_agent", spawn_on="booking_created")
+        @agent("handler_exec_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
         class HandlerExecAgent:
             class Context(BaseModel):
+                booking_id: int = 0
                 handled: bool = False
-
-            def get_namespace(self, event):
-                return f"booking:{event.entity.id}"
 
             @classmethod
             def create_context(cls, event):
-                return cls.Context()
+                return cls.Context(booking_id=event.entity.id)
 
             @handler("booking_confirmed")
             def on_confirmed(self, ctx):
@@ -295,7 +261,7 @@ class AgentIntegrationTests(TransactionTestCase):
 
             agent_run = AgentRun.objects.get(
                 agent_name="handler_exec_agent",
-                namespace=f"booking:{booking.id}",
+                context__booking_id=booking.id,
             )
 
             # Handler should have been called (booking_confirmed fires on create when status=confirmed)
@@ -309,17 +275,14 @@ class AgentIntegrationTests(TransactionTestCase):
         """Handler with positive offset executes after the event's scheduled time."""
         handler_log = []
 
-        @agent("offset_agent", spawn_on="booking_created")
+        @agent("offset_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
         class OffsetAgent:
             class Context(BaseModel):
-                pass
-
-            def get_namespace(self, event):
-                return f"booking:{event.entity.id}"
+                booking_id: int = 0
 
             @classmethod
             def create_context(cls, event):
-                return cls.Context()
+                return cls.Context(booking_id=event.entity.id)
 
             @handler("move_in", offset=timedelta(minutes=60))  # 1 hour after checkin
             def send_followup(self, ctx):
@@ -357,17 +320,14 @@ class AgentIntegrationTests(TransactionTestCase):
         """Handler with negative offset executes before the event's scheduled time."""
         handler_log = []
 
-        @agent("pre_checkin_agent", spawn_on="booking_created")
+        @agent("pre_checkin_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
         class PreCheckinAgent:
             class Context(BaseModel):
-                pass
-
-            def get_namespace(self, event):
-                return f"booking:{event.entity.id}"
+                booking_id: int = 0
 
             @classmethod
             def create_context(cls, event):
-                return cls.Context()
+                return cls.Context(booking_id=event.entity.id)
 
             @handler("move_in", offset=timedelta(minutes=-180))  # 3 hours before checkin
             def send_pre_checkin(self, ctx):
@@ -396,17 +356,14 @@ class AgentIntegrationTests(TransactionTestCase):
         """Multiple handlers for same event with different offsets fire at correct times."""
         handler_log = []
 
-        @agent("multi_offset_agent", spawn_on="booking_created")
+        @agent("multi_offset_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
         class MultiOffsetAgent:
             class Context(BaseModel):
-                pass
-
-            def get_namespace(self, event):
-                return f"booking:{event.entity.id}"
+                booking_id: int = 0
 
             @classmethod
             def create_context(cls, event):
-                return cls.Context()
+                return cls.Context(booking_id=event.entity.id)
 
             @handler("move_in", offset=timedelta(minutes=-60))  # 1 hour before
             def one_hour_before(self, ctx):
@@ -453,17 +410,14 @@ class AgentIntegrationTests(TransactionTestCase):
         def always_false(event, ctx):
             return False
 
-        @agent("condition_test_agent", spawn_on="booking_created")
+        @agent("condition_test_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
         class ConditionTestAgent:
             class Context(BaseModel):
-                pass
-
-            def get_namespace(self, event):
-                return f"booking:{event.entity.id}"
+                booking_id: int = 0
 
             @classmethod
             def create_context(cls, event):
-                return cls.Context()
+                return cls.Context(booking_id=event.entity.id)
 
             @handler("booking_confirmed", condition=always_false)
             def conditional_handler(self, ctx):
@@ -490,18 +444,16 @@ class AgentIntegrationTests(TransactionTestCase):
     def test_handler_updates_context(self):
         """Handler can update agent context."""
 
-        @agent("context_update_agent", spawn_on="booking_created")
+        @agent("context_update_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
         class ContextUpdateAgent:
             class Context(BaseModel):
+                booking_id: int = 0
                 counter: int = 0
                 messages: list = []
 
-            def get_namespace(self, event):
-                return f"booking:{event.entity.id}"
-
             @classmethod
             def create_context(cls, event):
-                return cls.Context()
+                return cls.Context(booking_id=event.entity.id)
 
             @handler("booking_confirmed")
             def increment_and_log(self, ctx):
@@ -519,7 +471,7 @@ class AgentIntegrationTests(TransactionTestCase):
             # Verify context was updated
             agent_run = AgentRun.objects.get(
                 agent_name="context_update_agent",
-                namespace=f"booking:{booking.id}",
+                context__booking_id=booking.id,
             )
             self.assertEqual(agent_run.context["counter"], 1)
             self.assertEqual(agent_run.context["messages"], ["confirmed"])
@@ -528,7 +480,7 @@ class AgentIntegrationTests(TransactionTestCase):
         """Test a realistic reservation journey with multiple timed handlers."""
         journey_log = []
 
-        @agent("reservation_journey", spawn_on="booking_created")
+        @agent("reservation_journey", spawn_on="booking_created", match={"id": "{{ ctx.reservation_id }}"})
         class ReservationJourney:
             class Context(BaseModel):
                 reservation_id: int = 0
@@ -536,9 +488,6 @@ class AgentIntegrationTests(TransactionTestCase):
                 pre_checkin_sent: bool = False
                 welcome_sent: bool = False
                 checkout_sent: bool = False
-
-            def get_namespace(self, event):
-                return f"reservation:{event.entity.id}"
 
             @classmethod
             def create_context(cls, event):
@@ -598,7 +547,7 @@ class AgentIntegrationTests(TransactionTestCase):
             # Verify all context flags were set
             agent_run = AgentRun.objects.get(
                 agent_name="reservation_journey",
-                namespace=f"reservation:{booking.id}",
+                context__reservation_id=booking.id,
             )
             self.assertTrue(agent_run.context["pre_checkin_sent"])
             self.assertTrue(agent_run.context["welcome_sent"])
@@ -627,9 +576,6 @@ class AgentManagerTests(TransactionTestCase):
             class Context(BaseModel):
                 custom_value: str = ""
 
-            def get_namespace(self, event):
-                return "test"
-
             @classmethod
             def create_context(cls, event):
                 return cls.Context()
@@ -654,9 +600,6 @@ class AgentManagerTests(TransactionTestCase):
             class Context(BaseModel):
                 pass
 
-            def get_namespace(self, event):
-                return "test"
-
             @classmethod
             def create_context(cls, event):
                 return cls.Context()
@@ -676,9 +619,6 @@ class AgentManagerTests(TransactionTestCase):
         class ListTestAgent:
             class Context(BaseModel):
                 pass
-
-            def get_namespace(self, event):
-                return "test"
 
             @classmethod
             def create_context(cls, event):
@@ -735,14 +675,11 @@ class HandlerOnSpawnEventTests(TransactionTestCase):
         """
         handler_log = []
 
-        @agent("guest_journey", spawn_on="booking_created")
+        @agent("guest_journey", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
         class GuestJourneyAgent:
             class Context(BaseModel):
                 booking_id: int = 0
                 access_code_set: bool = False
-
-            def get_namespace(self, event):
-                return f"booking:{event.entity.id}"
 
             @classmethod
             def create_context(cls, event):
@@ -770,7 +707,7 @@ class HandlerOnSpawnEventTests(TransactionTestCase):
             # Agent should have been created
             agent_run = AgentRun.objects.filter(
                 agent_name="guest_journey",
-                namespace=f"booking:{booking.id}",
+                context__booking_id=booking.id,
             ).first()
             self.assertIsNotNone(agent_run, "Agent should have been spawned")
 
@@ -845,13 +782,10 @@ class EventConditionTests(TransactionTestCase):
         """
         handler_log = []
 
-        @agent("journey_agent", spawn_on="booking_created")
+        @agent("journey_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
         class JourneyAgent:
             class Context(BaseModel):
                 booking_id: int = 0
-
-            def get_namespace(self, event):
-                return f"booking:{event.entity.id}"
 
             @classmethod
             def create_context(cls, event):
@@ -890,7 +824,7 @@ class EventConditionTests(TransactionTestCase):
             # Verify agent was created
             agent_run = AgentRun.objects.filter(
                 agent_name="journey_agent",
-                namespace=f"booking:{booking.id}",
+                context__booking_id=booking.id,
             ).first()
             self.assertIsNotNone(agent_run)
 
@@ -921,13 +855,10 @@ class EventConditionTests(TransactionTestCase):
         """
         handler_log = []
 
-        @agent("status_agent", spawn_on="booking_created")
+        @agent("status_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
         class StatusAgent:
             class Context(BaseModel):
                 booking_id: int = 0
-
-            def get_namespace(self, event):
-                return f"booking:{event.entity.id}"
 
             @classmethod
             def create_context(cls, event):
@@ -974,13 +905,10 @@ class EventConditionTests(TransactionTestCase):
         """
         handler_log = []
 
-        @agent("multi_event_agent", spawn_on="booking_created")
+        @agent("multi_event_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
         class MultiEventAgent:
             class Context(BaseModel):
                 booking_id: int = 0
-
-            def get_namespace(self, event):
-                return f"booking:{event.entity.id}"
 
             @classmethod
             def create_context(cls, event):

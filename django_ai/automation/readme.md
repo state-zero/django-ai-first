@@ -11,7 +11,7 @@
 * **Scheduled event**: `EventDefinition("name", date_field="...")` — occurs at that datetime (still gated by condition).
 * **Single-step automation**: `@on_event("name") def handler(event): ...` — simple "event → action".
 * **Workflow**: `@event_workflow("name", offset=timedelta(...))` + `@step(...)` — multi-step, offsets, waits, retries.
-* **Agent**: `@agent(spawn_on=["event1"], act_on=["event2"])` — long-running, stateful, cross-event processing.
+* **Agent**: `@agent("name", spawn_on="event", match={...})` + `@handler(...)` — long-running, stateful, multi-event processing with timed handlers.
 * **Waiting primitives**
 
   * `wait_for_event("name", ...)` → pauses until an **Event model** named `name` **occurs**. (Integration auto-bridges events to the signal channel `event:<name>`.)
@@ -238,127 +238,155 @@ engine.start("reindex_listing", listing_id=123)
 
 ---
 
-## 8) Long-Running Agents (NEW)
+## 8) Long-Running Agents
 
-Agents are stateful, long-lived processes that react to multiple events over time. Unlike workflows that complete after a sequence of steps, agents stay running and continuously process events.
+Agents are stateful, long-lived processes that react to multiple events over time. Unlike workflows that complete after a sequence of steps, agents stay running and continuously process events via declarative handlers.
 
 ### Basic Agent Structure
 
 ```python
-# automations/agents.py
 from pydantic import BaseModel
-from django_ai.automation.agents.core import agent
 from datetime import timedelta
+from django_ai.automation.agents.core import agent, handler, AgentManager
 
 @agent(
-    spawn_on=["guest_checked_in"],        # Events that create new agent instances
-    act_on=["room_service_request"],      # Events that wake existing agents  
-    heartbeat=timedelta(hours=1),         # Optional: periodic wake-ups
-    singleton=True                        # Optional: only one per namespace
+    "reservation_journey",
+    spawn_on="reservation_created",
+    match={"id": "{{ ctx.reservation_id }}"},  # How to find existing agent for events
+    singleton=True,                             # One agent per match
 )
-class GuestConciergeAgent:
+class ReservationJourney:
+    class Context(BaseModel):
+        reservation_id: int
+        guest_name: str = ""
+        reminder_sent: bool = False
+        welcome_sent: bool = False
+
+    @classmethod
+    def create_context(cls, event):
+        reservation = event.entity
+        return cls.Context(
+            reservation_id=reservation.id,
+            guest_name=reservation.guest.name,
+        )
+
+    @handler("reservation_confirmed")
+    def send_confirmation(self, ctx):
+        """Runs immediately when reservation is confirmed"""
+        send_email(ctx.guest_name, "Your booking is confirmed!")
+
+    @handler("checkin_due", offset=timedelta(hours=-3))
+    def send_pre_checkin(self, ctx):
+        """Runs 3 hours BEFORE checkin time"""
+        send_sms(ctx.guest_name, "Check-in opens soon!")
+        ctx.reminder_sent = True
+
+    @handler("checkin_due")
+    def send_welcome(self, ctx):
+        """Runs AT checkin time"""
+        send_message(ctx.guest_name, "Welcome! Your room is ready.")
+        ctx.welcome_sent = True
+
+    @handler("checkout_due", offset=timedelta(hours=1))
+    def send_feedback_request(self, ctx):
+        """Runs 1 hour AFTER checkout"""
+        send_email(ctx.guest_name, "How was your stay?")
+```
+
+### Match: Routing Events to Agents
+
+The `match` parameter defines how events are routed to agent instances. It maps entity fields to context values using Django template syntax.
+
+```python
+@agent(
+    "guest_support",
+    spawn_on="booking_created",
+    match={"guest_id": "{{ ctx.guest_id }}"},  # Entity.guest_id == ctx.guest_id
+)
+class GuestSupport:
     class Context(BaseModel):
         guest_id: int
-        room_number: str = ""
-        preferences: list = []
-        service_count: int = 0
+        booking_id: int
 
-    def get_namespace(self, event) -> str:
-        """Define which namespace this agent operates in"""
-        guest = event.entity
-        return f"guest_{guest.id}"
-
-    def act(self):
-        """Called each time the agent wakes up (spawn, act events, or heartbeat)"""
-        ctx = get_context()
-        
-        # Access current event that woke us
-        if ctx.current_event_name == "guest_checked_in":
-            self._handle_checkin()
-        elif ctx.current_event_name == "room_service_request":
-            self._handle_room_service()
-        else:
-            self._periodic_check()  # Heartbeat
-
-    def _handle_checkin(self):
-        ctx = get_context()
-        event = Event.objects.get(id=ctx.current_event_id)
+    @classmethod
+    def create_context(cls, event):
         booking = event.entity
-        
-        ctx.room_number = booking.room_number
-        # Send welcome message, set up preferences, etc.
-        
-    def _handle_room_service(self):
-        ctx = get_context()
-        ctx.service_count += 1
-        # Process room service request
-        
-        if ctx.service_count > 10:
-            self.finish()  # Stop this agent instance
-            
-    def _periodic_check(self):
-        # Called every hour via heartbeat
-        # Check for upsell opportunities, send notifications, etc.
+        return cls.Context(guest_id=booking.guest_id, booking_id=booking.id)
+
+    # This handler listens to a DIFFERENT entity type (Message vs Booking)
+    # The match override tells the system how to find the right agent
+    @handler("message_received", match={"sender_id": "{{ ctx.guest_id }}"})
+    def handle_message(self, ctx):
+        """Routes messages where message.sender_id == ctx.guest_id"""
         pass
 ```
 
-### Agent Lifecycle
-
-**Spawning**: When a `spawn_on` event occurs, a new agent instance is created (unless `singleton=True` and one already exists in that namespace).
-
-**Acting**: When `act_on` events occur, existing agent instances in matching namespaces wake up and call their `act()` method.
-
-**Heartbeat**: If specified, agents wake up periodically even without events.
-
-**Finishing**: Agents run until they call `self.finish()` or encounter an error.
-
-### Agent Strategies
-
+**Match supports Django ORM syntax:**
 ```python
-# Event-driven only
-@agent(spawn_on=["order_placed"], act_on=["payment_received", "order_shipped"])
-class OrderTracker:
-    # Wakes only on specific events
-    
-# Heartbeat-driven only  
-@agent(spawn_on=["user_registered"], heartbeat=timedelta(days=1))
-class UserOnboardingAgent:
-    # Wakes daily until finished
-    
-# Hybrid: events + heartbeat
-@agent(
-    spawn_on=["booking_created"], 
-    act_on=["guest_message"], 
-    heartbeat=timedelta(hours=6)
-)
-class GuestSupportAgent:
-    # Wakes on messages OR every 6 hours
-    
-# Single-run
-@agent(spawn_on=["account_created"])
-class WelcomeAgent:
-    # Runs once then automatically finishes
+match={"guest__id": "{{ ctx.guest_id }}"}     # Traverse relationships
+match={"status__in": "{{ ctx.valid_statuses }}"}  # Use lookups
 ```
 
-### Namespacing and Singletons
+### Handler Offsets
+
+Handlers can run before or after scheduled events:
 
 ```python
-@agent(spawn_on=["booking_confirmed"], singleton=True)
-class PropertyMaintenanceAgent:
-    def get_namespace(self, event) -> str:
-        booking = event.entity
-        return f"property_{booking.property_id}"
-        
-    # Only one maintenance agent per property
-    # New booking events wake the existing agent
+@handler("checkin_due", offset=timedelta(hours=-3))   # 3 hours BEFORE
+def pre_checkin(self, ctx): ...
+
+@handler("checkin_due")                                # AT the event time
+def on_checkin(self, ctx): ...
+
+@handler("checkin_due", offset=timedelta(hours=1))    # 1 hour AFTER
+def post_checkin(self, ctx): ...
 ```
 
-**Multiple namespaces**:
+### Handler Conditions
+
 ```python
-def get_namespace(self, event) -> list:
-    booking = event.entity
-    return [f"property_{booking.property_id}", f"guest_{booking.guest_id}"]
-    # Agent operates in both namespaces
+def guest_is_vip(event, ctx):
+    return ctx.is_vip
+
+@handler("checkin_due", condition=guest_is_vip)
+def vip_welcome(self, ctx):
+    """Only runs if guest is VIP"""
+    send_champagne(ctx.room_number)
+```
+
+### Handler Retries
+
+```python
+from django_ai.automation.workflows.core import Retry
+
+@handler("payment_due", retry=Retry(max_attempts=3, base_delay=timedelta(seconds=30)))
+def process_payment(self, ctx):
+    """Retries up to 3 times with exponential backoff"""
+    charge_card(ctx.payment_id)
+```
+
+### Event Claims Integration
+
+Agents can claim events to prevent other handlers from processing them:
+
+```python
+from django_ai.automation.events import claims
+
+@handler("ticket_created")
+def on_spawn(self, ctx):
+    # Claim all messages from this guest for this agent
+    claims.hold("message_received", match={"sender_id": ctx.guest_id})
+
+@handler("ticket_resolved")
+def cleanup(self, ctx):
+    # Release the claim when done
+    claims.release("message_received", match={"sender_id": ctx.guest_id})
+
+# Handlers that should ALWAYS run regardless of claims:
+@handler("message_received", ignores_claims=True)
+def audit_all_messages(self, ctx):
+    """Runs even when another flow has claimed this event"""
+    log_message(ctx.message_id)
 ```
 
 ### Agent Management
@@ -367,13 +395,13 @@ def get_namespace(self, event) -> list:
 from django_ai.automation.agents.core import AgentManager
 
 # Manually spawn an agent
-run = AgentManager.spawn("guestconciergeagent", namespaces="guest_123")
+run = AgentManager.spawn("reservation_journey", event=some_event)
 
 # List active agents
-active = AgentManager.list_active("guestconciergeagent", namespace="guest_123")
+active = AgentManager.list_active("reservation_journey")
 
-# Finish all agents of a type
-AgentManager.finish_all("guestconciergeagent", namespace="guest_123")
+# Complete an agent (releases all claims)
+AgentManager.complete(agent_run)
 ```
 
 ### Agent vs Workflow vs Single-Step
@@ -381,34 +409,8 @@ AgentManager.finish_all("guestconciergeagent", namespace="guest_123")
 | Use Case | Solution | Example |
 |----------|----------|---------|
 | Simple reaction to one event | `@on_event` | Send welcome email on signup |
-| Multi-step process with known sequence | `@event_workflow` | Checkout flow: payment → fulfillment → shipping |  
-| Long-running, stateful, cross-event processing | `@agent` | Customer support bot, property maintenance tracker |
-
-### Agent Context and State
-
-The agent's `Context` class automatically includes:
-- `triggering_event_id`: Event that spawned this agent
-- `current_event_id`: Event that woke the agent this time  
-- `current_event_name`: Name of current event
-- `agent_namespaces`: List of namespaces this agent operates in
-- `spawned_at`, `last_action`: Timing information
-
-```python
-def act(self):
-    ctx = get_context()
-    
-    # Check what woke us
-    if ctx.current_event_name == "high_priority_request":
-        # Handle urgently
-        pass
-    
-    # Access the triggering event
-    original_event = Event.objects.get(id=ctx.triggering_event_id)
-    
-    # Finish based on conditions
-    if some_completion_condition():
-        self.finish()
-```
+| Multi-step process with known sequence | `@event_workflow` | Checkout flow: payment → fulfillment → shipping |
+| Long-running, multi-event, timed handlers | `@agent` | Guest journey with pre-checkin, welcome, post-checkout |
 
 ---
 
@@ -418,7 +420,8 @@ def act(self):
 * Scheduled: `EventDefinition("name", date_field="dt", condition=...)`
 * Single-step: `@on_event("name") def handler(event): obj = event.entity`
 * Workflow (offsets): `@event_workflow("name", offset=timedelta(...))`
-* Agent (long-running): `@agent(spawn_on=["e1"], act_on=["e2"], heartbeat=timedelta(...))`
+* Agent: `@agent("name", spawn_on="event", match={"field": "{{ ctx.value }}"})`
+* Handler: `@handler("event", offset=timedelta(...), match={...})`
 * Control flows: `goto`, `sleep`,
   `wait_for_event("EventName", timeout, on_timeout)`,
   `wait("custom:signal", timeout, on_timeout)`,
