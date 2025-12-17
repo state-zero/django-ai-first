@@ -62,15 +62,17 @@ class EventDefinition:
 
     def get_watched_values(self, instance: models.Model) -> Optional[dict]:
         """Get current values of watched fields from instance, None if no watch_fields"""
+        import json
+        from django.core.serializers.json import DjangoJSONEncoder
+
         if not self.watch_fields:
             return None
         values = {}
         for field in self.watch_fields:
             value = getattr(instance, field, None)
-            # Convert to JSON-serializable format
+            # Convert FK to pk
             if hasattr(value, 'pk'):
                 value = value.pk
-            elif hasattr(value, 'isoformat'):
-                value = value.isoformat()
-            values[field] = value
+            # Use Django's encoder to handle UUID, datetime, Decimal, etc.
+            values[field] = json.loads(json.dumps(value, cls=DjangoJSONEncoder))
         return values
