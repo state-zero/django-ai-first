@@ -274,15 +274,13 @@ class Event(models.Model):
         from .callbacks import callback_registry, EventPhase
 
         # Track if this is a new event or status change
-        is_new = self.pk is None
+        is_new = self._state.adding
         old_status = None
 
         if not is_new:
-            try:
-                old_event = Event.objects.get(pk=self.pk)
-                old_status = old_event.status
-            except Event.DoesNotExist:
-                is_new = True
+            old_event = Event.objects.filter(pk=self.pk).only("status").first()
+            if old_event:
+                old_status = old_event.status                
 
         # Save the event first
         super().save(*args, **kwargs)
