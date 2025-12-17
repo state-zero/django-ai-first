@@ -68,11 +68,10 @@ class EventDefinition:
         if not self.watch_fields:
             return None
         values = {}
-        for field in self.watch_fields:
-            value = getattr(instance, field, None)
-            # Convert FK to pk
-            if hasattr(value, 'pk'):
-                value = value.pk
-            # Use Django's encoder to handle UUID, datetime, Decimal, etc.
-            values[field] = json.loads(json.dumps(value, cls=DjangoJSONEncoder))
+        for field_name in self.watch_fields:
+            field = instance._meta.get_field(field_name)
+            # Get the DB-stored value (handles FK->id, etc.)
+            value = field.value_from_object(instance)
+            # Ensure JSON serializable (handles UUID, datetime, Decimal)
+            values[field_name] = json.loads(json.dumps(value, cls=DjangoJSONEncoder))
         return values
