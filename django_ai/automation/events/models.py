@@ -165,8 +165,8 @@ class EventManager(models.Manager):
         content_type = ContentType.objects.get_for_model(instance.__class__)
 
         for event_def in instance.__class__.events:
-            # Get current watched values (None if no watch_fields defined)
-            current_watched = event_def.get_watched_values(instance)
+            # Get current watched values hash (None if no watch_fields defined)
+            current_watched = event_def.get_watched_values_hash(instance)
 
             # Always create event records (for tracking), but only fire based on trigger
             event, created = self.get_or_create(
@@ -176,10 +176,10 @@ class EventManager(models.Manager):
                 namespace=event_def.get_namespace(instance)
             )
 
-            # Update watched_values snapshot on create
+            # Update watched_values_hash snapshot on create
             if created and current_watched is not None:
-                event.watched_values = current_watched
-                event.save(update_fields=["watched_values"])
+                event.watched_values_hash = current_watched
+                event.save(update_fields=["watched_values_hash"])
 
             # Skip firing if this event doesn't match the current trigger
             if not event_def.should_trigger(trigger):
@@ -189,12 +189,12 @@ class EventManager(models.Manager):
             if trigger in (EventTrigger.UPDATE, EventTrigger.DELETE) and not created:
                 # If watch_fields defined, check if any watched values changed
                 if current_watched is not None:
-                    if event.watched_values == current_watched:
+                    if event.watched_values_hash == current_watched:
                         # No change in watched fields, skip entirely
                         continue
                     # Values changed - update the snapshot
-                    event.watched_values = current_watched
-                    event.save(update_fields=["watched_values"])
+                    event.watched_values_hash = current_watched
+                    event.save(update_fields=["watched_values_hash"])
 
                 # Reset to PENDING if already processed, so it can fire again
                 if event.status == EventStatus.PROCESSED:
@@ -245,10 +245,11 @@ class Event(models.Model):
     event_created_at: datetime = models.DateTimeField(auto_now_add=True)
     event_updated_at: datetime = models.DateTimeField(auto_now=True)
 
-    watched_values = models.JSONField(
+    watched_values_hash = models.CharField(
+        max_length=64,
         null=True,
         blank=True,
-        help_text="Snapshot of watched field values for change detection",
+        help_text="SHA256 hash of watched field values for change detection",
     )
 
     namespace = models.CharField(

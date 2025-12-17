@@ -60,18 +60,21 @@ class EventDefinition:
         """Check if this event should fire for the given trigger"""
         return trigger in self.triggers
 
-    def get_watched_values(self, instance: models.Model) -> Optional[dict]:
-        """Get current values of watched fields from instance, None if no watch_fields"""
-        import json
-        from django.core.serializers.json import DjangoJSONEncoder
+    def get_watched_values_hash(self, instance: models.Model) -> Optional[str]:
+        """Get a hash of watched field values for change detection, None if no watch_fields.
+
+        Uses get_prep_value() which is Django's canonical way to convert any field
+        value to its database representation - handles all field types consistently.
+        """
+        import hashlib
 
         if not self.watch_fields:
             return None
-        values = {}
-        for field_name in self.watch_fields:
+
+        hasher = hashlib.sha256()
+        for field_name in sorted(self.watch_fields):  # sort for deterministic ordering
             field = instance._meta.get_field(field_name)
-            # Get the DB-stored value (handles FK->id, etc.)
-            value = field.value_from_object(instance)
-            # Ensure JSON serializable (handles UUID, datetime, Decimal)
-            values[field_name] = json.loads(json.dumps(value, cls=DjangoJSONEncoder))
-        return values
+            # get_prep_value converts to DB-storage form (handles all types)
+            db_value = field.get_prep_value(field.value_from_object(instance))
+            hasher.update(f"{field_name}:{db_value!r}".encode('utf-8'))
+        return hasher.hexdigest()

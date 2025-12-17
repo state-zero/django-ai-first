@@ -2079,25 +2079,29 @@ class EventWatchFieldsTest(TransactionTestCase):
         event_def = EventDefinition("test_event", trigger=EventTrigger.UPDATE)
         self.assertIsNone(event_def.watch_fields)
 
-    def test_get_watched_values_returns_none_without_watch_fields(self):
-        """Test get_watched_values returns None when no watch_fields defined"""
+    def test_get_watched_values_hash_returns_none_without_watch_fields(self):
+        """Test get_watched_values_hash returns None when no watch_fields defined"""
         event_def = EventDefinition("test_event", trigger=EventTrigger.UPDATE)
         instance = TestWatchFieldsModel(name="Test", status="pending", priority=1)
-        self.assertIsNone(event_def.get_watched_values(instance))
+        self.assertIsNone(event_def.get_watched_values_hash(instance))
 
-    def test_get_watched_values_returns_dict(self):
-        """Test get_watched_values returns correct values"""
+    def test_get_watched_values_hash_returns_hash_string(self):
+        """Test get_watched_values_hash returns a SHA256 hash string"""
         event_def = EventDefinition(
             "test_event",
             trigger=EventTrigger.UPDATE,
             watch_fields=["status", "priority"],
         )
         instance = TestWatchFieldsModel(name="Test", status="active", priority=5)
-        values = event_def.get_watched_values(instance)
-        self.assertEqual(values, {"status": "active", "priority": 5})
+        hash_value = event_def.get_watched_values_hash(instance)
+        # Should be a 64-character hex string (SHA256)
+        self.assertIsInstance(hash_value, str)
+        self.assertEqual(len(hash_value), 64)
+        # Should be deterministic
+        self.assertEqual(hash_value, event_def.get_watched_values_hash(instance))
 
-    def test_watched_values_stored_on_event_creation(self):
-        """Test that watched_values are stored on Event when created"""
+    def test_watched_values_hash_stored_on_event_creation(self):
+        """Test that watched_values_hash is stored on Event when created"""
         instance = TestWatchFieldsModel.objects.create(
             name="Test",
             status="pending",
@@ -2111,7 +2115,9 @@ class EventWatchFieldsTest(TransactionTestCase):
             event_name="status_changed",
         )
 
-        self.assertEqual(event.watched_values, {"status": "pending"})
+        # Should have a hash stored (64-char SHA256 hex)
+        self.assertIsNotNone(event.watched_values_hash)
+        self.assertEqual(len(event.watched_values_hash), 64)
 
     def test_update_without_watch_fields_fires_every_time(self):
         """Test UPDATE trigger without watch_fields fires on every save"""
@@ -2215,8 +2221,8 @@ class EventWatchFieldsTest(TransactionTestCase):
         instance.save()
         self.assertEqual(len(callback_log), 3)
 
-    def test_watched_values_snapshot_updated_after_trigger(self):
-        """Test that watched_values snapshot is updated after event triggers"""
+    def test_watched_values_hash_snapshot_updated_after_trigger(self):
+        """Test that watched_values_hash snapshot is updated after event triggers"""
         instance = TestWatchFieldsModel.objects.create(name="Test", status="pending")
 
         # Get the event
@@ -2225,7 +2231,8 @@ class EventWatchFieldsTest(TransactionTestCase):
             entity_id=str(instance.id),
             event_name="status_changed",
         )
-        self.assertEqual(event.watched_values, {"status": "pending"})
+        initial_hash = event.watched_values_hash
+        self.assertIsNotNone(initial_hash)
 
         # Update status
         instance.status = "active"
@@ -2233,7 +2240,8 @@ class EventWatchFieldsTest(TransactionTestCase):
 
         # Refresh and check snapshot was updated
         event.refresh_from_db()
-        self.assertEqual(event.watched_values, {"status": "active"})
+        self.assertNotEqual(event.watched_values_hash, initial_hash)
+        self.assertEqual(len(event.watched_values_hash), 64)
 
     def test_backward_compatibility_without_watch_fields(self):
         """Test that events without watch_fields still work (backward compatible)"""
@@ -2259,8 +2267,8 @@ class EventWatchFieldsTest(TransactionTestCase):
         instance.save()
         self.assertEqual(len(callback_log), 2)
 
-    def test_watch_fields_with_foreign_key(self):
-        """Test watch_fields correctly handles FK fields (stores pk)"""
+    def test_watch_fields_hash_changes_with_foreign_key(self):
+        """Test watch_fields hash changes when FK field changes"""
         event_def = EventDefinition(
             "test_event",
             trigger=EventTrigger.UPDATE,
@@ -2268,19 +2276,24 @@ class EventWatchFieldsTest(TransactionTestCase):
         )
 
         # Create a booking with guest
-        guest = Guest.objects.create(email="test@example.com", name="Test Guest")
+        guest1 = Guest.objects.create(email="test@example.com", name="Test Guest")
+        guest2 = Guest.objects.create(email="other@example.com", name="Other Guest")
         booking = Booking.objects.create(
-            guest=guest,
+            guest=guest1,
             checkin_date=timezone.now() + timedelta(days=1),
             checkout_date=timezone.now() + timedelta(days=2),
         )
 
-        values = event_def.get_watched_values(booking)
-        # FK should be stored as pk value
-        self.assertEqual(values, {"guest": guest.pk})
+        hash1 = event_def.get_watched_values_hash(booking)
+        self.assertEqual(len(hash1), 64)
 
-    def test_watch_fields_with_datetime(self):
-        """Test watch_fields correctly handles datetime fields (stores isoformat)"""
+        # Change guest and verify hash changes
+        booking.guest = guest2
+        hash2 = event_def.get_watched_values_hash(booking)
+        self.assertNotEqual(hash1, hash2)
+
+    def test_watch_fields_hash_changes_with_datetime(self):
+        """Test watch_fields hash changes when datetime field changes"""
         event_def = EventDefinition(
             "test_event",
             trigger=EventTrigger.UPDATE,
@@ -2294,6 +2307,10 @@ class EventWatchFieldsTest(TransactionTestCase):
             checkout_date=test_date + timedelta(days=1),
         )
 
-        values = event_def.get_watched_values(booking)
-        # Datetime should be stored as isoformat string
-        self.assertEqual(values, {"checkin_date": test_date.isoformat()})
+        hash1 = event_def.get_watched_values_hash(booking)
+        self.assertEqual(len(hash1), 64)
+
+        # Change datetime and verify hash changes
+        booking.checkin_date = test_date + timedelta(hours=1)
+        hash2 = event_def.get_watched_values_hash(booking)
+        self.assertNotEqual(hash1, hash2)
