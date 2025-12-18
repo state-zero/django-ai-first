@@ -7,7 +7,7 @@ from contextvars import ContextVar
 from typing import Optional, Any
 
 from .models import ConversationWidget
-from ..utils.json import safe_model_dump
+from ..utils.json import safe_model_dump, restore_model_data
 
 # Thread-safe context storage
 _current_session = ContextVar("current_session", default=None)
@@ -62,7 +62,7 @@ def get_context():
             from .registry import registry
 
             agent_class = registry.get(session.agent_path)
-            context = agent_class.Context(**session.context)
+            context = agent_class.Context(**restore_model_data(session.context))
             _current_agent_context.set(context)
     return context
 

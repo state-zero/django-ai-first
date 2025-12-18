@@ -15,7 +15,7 @@ from django.db import transaction
 from django.db.models import Q
 from .models import WorkflowRun, WorkflowStatus, StepExecution, StepType
 from django.utils import timezone
-from ...utils.json import safe_model_dump
+from ...utils.json import safe_model_dump, restore_model_data
 
 # Type alias for offset - accepts both timedelta and relativedelta
 OffsetType = Union[timedelta, relativedelta]
@@ -223,7 +223,7 @@ class WorkflowContextManager:
         if self._context is None:
             if not self._run:
                 self._run = WorkflowRun.objects.get(id=self.run_id)
-            self._context = self.context_class.model_validate(self._run.data)
+            self._context = self.context_class.model_validate(restore_model_data(self._run.data))
             self._original_data = dict(self._run.data)
         return self._context
 
@@ -687,7 +687,7 @@ class WorkflowEngine:
                     # Load the child workflow result
                     child_run = WorkflowRun.objects.get(id=run.active_subworkflow_run_id)
                     child_workflow_cls = _workflows[child_run.name]
-                    child_context = child_workflow_cls.Context.model_validate(child_run.data)
+                    child_context = child_workflow_cls.Context.model_validate(restore_model_data(child_run.data))
 
                     step_kwargs['subflow_result'] = SubflowResult(
                         status=child_run.status,
@@ -876,7 +876,7 @@ class WorkflowEngine:
                     _current_context.reset(token)
 
             # Update parent context to store child run ID
-            parent_context = workflow_cls.Context.model_validate(run.data)
+            parent_context = workflow_cls.Context.model_validate(restore_model_data(run.data))
             if hasattr(parent_context, 'active_subworkflow_run_id'):
                 parent_context.active_subworkflow_run_id = child_run.id
                 run.data = safe_model_dump(parent_context)
@@ -912,7 +912,7 @@ class WorkflowEngine:
             run.status = WorkflowStatus.COMPLETED
             run.progress = 1.0
             if result.result:
-                context = workflow_cls.Context.model_validate(run.data)
+                context = workflow_cls.Context.model_validate(restore_model_data(run.data))
                 for key, value in result.result.items():
                     if hasattr(context, key):
                         setattr(context, key, value)
@@ -971,7 +971,7 @@ class WorkflowEngine:
         for run in waiting_runs:
             if payload:
                 workflow_cls = _workflows[run.name]
-                context = workflow_cls.Context.model_validate(run.data)
+                context = workflow_cls.Context.model_validate(restore_model_data(run.data))
                 for key, value in payload.items():
                     if hasattr(context, key):
                         setattr(context, key, value)
