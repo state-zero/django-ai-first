@@ -1,6 +1,5 @@
 Django==5.1.7
 pydantic
-jsonpickle
 cytoolz==1.0.1
 django-q2==1.8.0
 requests

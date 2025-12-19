@@ -1,21 +1,45 @@
-import jsonpickle
+import json
+import logging
 from typing import Dict, Any
 from pydantic import BaseModel
+from django.core.serializers.json import DjangoJSONEncoder
 
-# TODO: Consider changing WorkflowRun.data from JSONField to TextField.
-# JSONField is legacy from when we used JSON serialization for persistence.
-# Now we store jsonpickle output as an opaque string, so TextField would be cleaner.
+logger = logging.getLogger(__name__)
 
 
 def safe_model_dump(model: BaseModel) -> Dict[str, Any]:
-    """Serialize a Pydantic model to a JSON-compatible dict using jsonpickle.
-
-    Stores the jsonpickle output as a string to preserve py/id reference ordering,
-    which breaks if the JSON is parsed and re-serialized with different key order.
     """
-    return {"__jsonpickle__": jsonpickle.encode(model.model_dump())}
+    Safely dump a Pydantic model to a JSON-serializable dict.
 
+    Uses Pydantic's built-in JSON serialization which handles datetime, Decimal, UUID, etc.
+    Falls back to DjangoJSONEncoder for Django-specific types if needed.
 
-def restore_model_data(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Restore a dict serialized with safe_model_dump() back to Python objects."""
-    return jsonpickle.decode(data["__jsonpickle__"])
+    Args:
+        model: Pydantic model instance to serialize
+
+    Returns:
+        Dict with JSON-serializable values
+
+    Example:
+        >>> from pydantic import BaseModel
+        >>> from datetime import datetime
+        >>>
+        >>> class MyModel(BaseModel):
+        ...     name: str
+        ...     created_at: datetime
+        ...
+        >>> model = MyModel(name="test", created_at=datetime.now())
+        >>> data = safe_model_dump(model)
+        >>> # created_at is now an ISO string, not datetime object
+    """
+    try:
+        # PRIMARY: Use model_dump with mode='json' to get JSON-serializable values
+        # This handles datetime, Decimal, UUID, etc. automatically
+        return model.model_dump(mode="json")
+    except Exception as e:
+        # FALLBACK: Use Django's JSONEncoder for Django-specific types
+        logger.warning(
+            f"model_dump(mode='json') failed for {model.__class__.__name__}, using DjangoJSONEncoder fallback: {e}"
+        )
+        raw_dict = model.model_dump()
+        return json.loads(json.dumps(raw_dict, cls=DjangoJSONEncoder))
