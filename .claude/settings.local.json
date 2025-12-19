@@ -8,8 +8,7 @@
       "Bash(cat:*)",
       "Bash(python manage.py shell:*)",
       "Bash(find:*)",
-      "Bash(python manage.py migrate:*)",
-      "Bash(echo:*)"
+      "Bash(python manage.py migrate:*)"
     ],
     "deny": [],
     "ask": []
