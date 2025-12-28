@@ -20,6 +20,7 @@ from django_ai.conversations.context import (
     ResponseStream,
     display_widget,
 )
+from django_ai.conf import get_pusher_config
 from django_ai.automation.workflows.core import engine
 from django_ai.automation.queues.sync_executor import SynchronousExecutor
 
@@ -191,12 +192,10 @@ class FullConversationFlowTest(APITestCase):
         self.client.force_authenticate(user=self.user)
 
         # Check Pusher configuration
-        from django.conf import settings
-
-        pusher_config = getattr(settings, "DJANGO_AI_PUSHER", {})
+        pusher_config = get_pusher_config()
         if not pusher_config.get("KEY"):
             self.skipTest(
-                "DJANGO_AI_PUSHER not configured - skipping integration tests"
+                "DJANGO_AI['PUSHER'] not configured - skipping integration tests"
             )
 
         # Set up Pusher event capture
@@ -255,9 +254,8 @@ class FullConversationFlowTest(APITestCase):
         ) as mock_pusher_class:
             # Configure real Pusher with event capture
             import pusher
-            from django.conf import settings
 
-            pusher_config = getattr(settings, "DJANGO_AI_PUSHER", {})
+            pusher_config = get_pusher_config()
             real_pusher = pusher.Pusher(
                 app_id=pusher_config.get("APP_ID"),
                 key=pusher_config.get("KEY"),
@@ -439,11 +437,10 @@ class PusherAuthTest(APITestCase):
         )
 
         # Check Pusher configuration
-        from django.conf import settings
-        pusher_config = getattr(settings, "DJANGO_AI_PUSHER", {})
+        pusher_config = get_pusher_config()
         if not pusher_config.get("KEY"):
             self.skipTest(
-                "DJANGO_AI_PUSHER not configured - skipping Pusher auth tests"
+                "DJANGO_AI['PUSHER'] not configured - skipping Pusher auth tests"
             )
 
         # Register a simple test agent

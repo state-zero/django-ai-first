@@ -65,12 +65,17 @@ STATEZERO_PUSHER = {
     "CLUSTER": os.getenv("PUSHER_CLUSTER"),
 }
 
-# Django ai pusher
-DJANGO_AI_PUSHER = {
-    "APP_ID": os.getenv("PUSHER_APP_ID"),
-    "KEY": os.getenv("PUSHER_KEY"),
-    "SECRET": os.getenv("PUSHER_SECRET"),
-    "CLUSTER": os.getenv("PUSHER_CLUSTER"),
+# Django AI settings
+DJANGO_AI = {
+    "PUSHER": {
+        "APP_ID": os.getenv("PUSHER_APP_ID"),
+        "KEY": os.getenv("PUSHER_KEY"),
+        "SECRET": os.getenv("PUSHER_SECRET"),
+        "CLUSTER": os.getenv("PUSHER_CLUSTER"),
+    },
+    "TIKA_SERVER_ENDPOINT": os.getenv("TIKA_SERVER_ENDPOINT"),
+    "WORKFLOW_TESTING_MODE": False,
+    "SKIP_Q2_AUTOSCHEDULE": False,
 }
 
 MIDDLEWARE = [

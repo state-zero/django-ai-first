@@ -1,8 +1,8 @@
-from django.conf import settings
 from django_q.models import Schedule
+from ...conf import should_skip_q2_autoschedule
 
 def ensure_q2_schedules():
-    if getattr(settings, "SKIP_Q2_AUTOSCHEDULE", False):
+    if should_skip_q2_autoschedule():
         return
 
     Schedule.objects.update_or_create(

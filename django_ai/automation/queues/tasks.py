@@ -16,8 +16,9 @@ def process_scheduled_workflows() -> dict:
 
 
 def process_scheduled_agents() -> dict:
+    from ..agents.core import agent_engine
     with transaction.atomic():
-        engine.process_scheduled()
+        agent_engine.process_scheduled_handlers()
     return {"processed_at": timezone.now().isoformat(), "kind": "agents"}
 
 

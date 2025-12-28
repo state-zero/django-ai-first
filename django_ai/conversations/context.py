@@ -1,5 +1,4 @@
 import pusher
-from django.conf import settings
 import uuid
 import time
 from contextlib import contextmanager
@@ -8,6 +7,7 @@ from typing import Optional, Any
 
 from .models import ConversationWidget
 from ..utils.json import safe_model_dump
+from ..conf import get_pusher_config
 
 # Thread-safe context storage
 _current_session = ContextVar("current_session", default=None)
@@ -24,7 +24,7 @@ class ConversationContext:
         self.channel_name = f"private-conversation-session-{session_id}"
 
         # Initialize Pusher client
-        pusher_config = getattr(settings, "DJANGO_AI_PUSHER", {})
+        pusher_config = get_pusher_config()
         self.pusher_client = (
             pusher.Pusher(
                 app_id=pusher_config.get("APP_ID"),

@@ -2,7 +2,6 @@ import logging
 import traceback
 from datetime import timedelta
 from typing import Dict, Any, Optional, Callable, TypeVar, Generic, Union
-from django.conf import settings
 
 from pydantic import BaseModel
 from dateutil.relativedelta import relativedelta
@@ -16,6 +15,7 @@ from django.db.models import Q
 from .models import WorkflowRun, WorkflowStatus, StepExecution, StepType
 from django.utils import timezone
 from ...utils.json import safe_model_dump
+from ...conf import is_workflow_testing_mode
 
 # Type alias for offset - accepts both timedelta and relativedelta
 OffsetType = Union[timedelta, relativedelta]
@@ -988,7 +988,7 @@ class WorkflowEngine:
         """Handle step execution errors with retry"""
         
         # If WORKFLOW_TESTING_MODE is True, re-raise the original exception immediately
-        if getattr(settings, 'WORKFLOW_TESTING_MODE', False):
+        if is_workflow_testing_mode():
             raise error
         
         try:

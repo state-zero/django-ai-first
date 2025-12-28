@@ -2,10 +2,10 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
-from django.conf import settings
 import pusher
 
 from .models import ConversationSession
+from ..conf import get_pusher_config
 
 
 @api_view(['POST'])
@@ -67,8 +67,8 @@ def pusher_auth(request):
             status=status.HTTP_404_NOT_FOUND
         )
     
-    # Initialize Pusher with DJANGO_AI_PUSHER config
-    pusher_config = getattr(settings, 'DJANGO_AI_PUSHER', {})
+    # Initialize Pusher with config
+    pusher_config = get_pusher_config()
     
     if not pusher_config.get('KEY'):
         return Response(

@@ -73,7 +73,7 @@ class TikaParser(BaseParser):
         """Parse file using Apache Tika"""
         try:
             from tika import parser
-            from django.conf import settings
+            from ..conf import get_tika_server_endpoint
         except ImportError:
             raise OCRException(
                 "tika-python is not installed. Install with: pip install tika"
@@ -83,7 +83,7 @@ class TikaParser(BaseParser):
 
         try:
             # Determine server URL from settings
-            server_url = self.server_url or getattr(settings, 'TIKA_SERVER_ENDPOINT', None) or os.getenv('TIKA_SERVER_ENDPOINT', None)
+            server_url = self.server_url or get_tika_server_endpoint() or os.getenv('TIKA_SERVER_ENDPOINT', None)
 
             # Parse based on input type
             if isinstance(file_source, (str, Path)):
