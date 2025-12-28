@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('conversations', '0004_conversationmessage_tables'),
+        ('conversations', '0003_conversationmessage_files'),
         ('tools', '0001_initial'),
     ]
 

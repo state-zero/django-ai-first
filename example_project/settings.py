@@ -48,7 +48,6 @@ INSTALLED_APPS = [
     "django_ai.automation.agents",
     "django_ai.conversations",
     "django_ai.files",
-    "django_ai.tables",
     "django_ai.tools",
     "tests",
 ]
