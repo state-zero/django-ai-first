@@ -1,4 +1,5 @@
 import pusher
+from django.conf import settings
 import uuid
 import time
 from contextlib import contextmanager
@@ -23,8 +24,7 @@ class ConversationContext:
         self.channel_name = f"private-conversation-session-{session_id}"
 
         # Initialize Pusher client
-        from django_ai.conf import get_pusher_config
-        pusher_config = get_pusher_config()
+        pusher_config = getattr(settings, "DJANGO_AI_PUSHER", {})
         self.pusher_client = (
             pusher.Pusher(
                 app_id=pusher_config.get("APP_ID"),

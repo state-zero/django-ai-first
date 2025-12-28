@@ -8,11 +8,7 @@
       "Bash(cat:*)",
       "Bash(python manage.py shell:*)",
       "Bash(find:*)",
-      "Bash(python manage.py migrate:*)",
-      "WebSearch",
-      "WebFetch(domain:django-q2.readthedocs.io)",
-      "WebFetch(domain:github.com)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "Bash(python manage.py migrate:*)"
     ],
     "deny": [],
     "ask": []

@@ -51,7 +51,6 @@ class ProcessingStats:
     workflows_woken: int = 0
     steps_executed: int = 0
     handlers_executed: int = 0
-    tasks_dispatched: int = 0
 
 
 @dataclass
@@ -202,12 +201,6 @@ class TimeMachine:
         stats.handlers_executed = ready_handlers
         self.stats.handlers_executed += stats.handlers_executed
 
-        # Process due timed tasks (precise scheduling and debounce)
-        from django_ai.automation.timers.core import process_due_tasks
-        timer_result = process_due_tasks()
-        stats.tasks_dispatched = timer_result.dispatched
-        self.stats.tasks_dispatched += stats.tasks_dispatched
-
         return stats
 
     def run_until_idle(self, max_iterations: int = 100) -> ProcessingStats:
@@ -229,10 +222,9 @@ class TimeMachine:
             total_stats.events_processed += stats.events_processed
             total_stats.workflows_woken += stats.workflows_woken
             total_stats.handlers_executed += stats.handlers_executed
-            total_stats.tasks_dispatched += stats.tasks_dispatched
 
             if (stats.events_processed == 0 and stats.workflows_woken == 0
-                    and stats.handlers_executed == 0 and stats.tasks_dispatched == 0):
+                    and stats.handlers_executed == 0):
                 break
 
         return total_stats
@@ -339,10 +331,6 @@ class TimeMachine:
 
     def __enter__(self) -> "TimeMachine":
         """Start the time machine (called by context manager)."""
-        # Pause the sync thread so it doesn't interfere with mocked time
-        from django_ai.automation.timers.core import pause_sync_thread
-        pause_sync_thread()
-
         self._original_now = timezone.now
         self._patcher = patch("django.utils.timezone.now", self._now)
         self._patcher.start()
@@ -353,11 +341,6 @@ class TimeMachine:
         self.stop_background_loop()
         if self._patcher:
             self._patcher.stop()
-
-        # Resume the sync thread
-        from django_ai.automation.timers.core import resume_sync_thread
-        resume_sync_thread()
-
         return None
 
 
