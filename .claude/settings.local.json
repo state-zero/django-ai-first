@@ -12,7 +12,10 @@
       "WebSearch",
       "Bash(python manage.py check:*)",
       "Bash(python manage.py showmigrations:*)",
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "Bash(py manage.py test:*)",
+      "Bash(python3 manage.py test:*)",
+      "Bash(where:*)"
     ],
     "deny": [],
     "ask": []

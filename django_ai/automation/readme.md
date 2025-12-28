@@ -17,6 +17,8 @@
   * `wait_for_event("name", ...)` → pauses until an **Event model** named `name` **occurs**. (Integration auto-bridges events to the signal channel `event:<name>`.)
   * `wait("custom:signal", ...)` → pauses until **you** call `engine.signal("custom:signal", payload)`.
 
+* **Debouncing**: `debounce=timedelta(...)` + `debounce_key="{entity.id}"` — groups rapid events and fires once after a quiet period.
+
 And yes: **`event.entity`** resolves the underlying model instance (via ContentType), so you can use that directly.
 
 ---
@@ -38,6 +40,39 @@ class Reservation(models.Model):
         # Scheduled: occurs at checkin_at (still gated by condition)
         EventDefinition("checkin_due", date_field="checkin_at", condition=lambda r: r.status == "confirmed"),
     ]
+```
+
+### Dynamic Event Names (Templates)
+
+Event names can use Django template syntax to include model values:
+
+```python
+class Task(models.Model):
+    task_type = models.CharField(max_length=50)
+    status = models.CharField(max_length=20)
+
+    events = [
+        # Static event name
+        EventDefinition("task_created"),
+
+        # Dynamic event name - includes task_type from the model
+        EventDefinition("task_completed:{{ instance.task_type }}"),
+
+        # More examples
+        EventDefinition("order_{{ instance.status }}"),  # "order_shipped", "order_delivered", etc.
+    ]
+```
+
+The model instance is available as `instance` in templates. This allows handlers/workflows to listen for specific event variants:
+
+```python
+@on_event("task_completed:review")  # Only fires for task_type="review"
+def handle_review_task(event):
+    pass
+
+@on_event("task_completed:approval")  # Only fires for task_type="approval"
+def handle_approval_task(event):
+    pass
 ```
 
 What happens automatically:
@@ -414,14 +449,151 @@ AgentManager.complete(agent_run)
 
 ---
 
-## 9) Cheatsheet
+## 9) Debouncing
+
+Debouncing prevents rapid-fire execution when multiple events occur in quick succession. Instead of triggering a handler/workflow for each event, debouncing waits for a quiet period and then fires once with all accumulated events.
+
+**Use cases:**
+- User rapidly updates a record multiple times → send one notification
+- Multiple related events fire together → process them as a batch
+- Prevent duplicate work when events cluster
+
+### Debouncing with `@on_event`
+
+```python
+from datetime import timedelta
+from django_ai.automation.events.callbacks import on_event
+
+@on_event(
+    event_name="booking_updated",
+    debounce=timedelta(seconds=30),
+    debounce_key="{entity.id}",  # Group by booking ID
+)
+def sync_booking_to_calendar(events):  # Note: receives list of events
+    """Called once with all updates from the last 30 seconds."""
+    # events is a list of Event objects
+    booking = events[-1].entity  # Use latest state
+    calendar_service.sync(booking)
+```
+
+**Key points:**
+- Callback signature must accept `events` (plural) parameter
+- Events with the same resolved `debounce_key` are grouped together
+- Handler fires after `debounce` duration with no new events
+
+### Debouncing with `@event_workflow`
+
+```python
+from datetime import timedelta
+from pydantic import BaseModel
+from django_ai.automation.workflows.core import event_workflow, step, complete
+
+@event_workflow(
+    event_name="guest_message_received",
+    debounce=timedelta(minutes=5),
+    debounce_key="{entity.guest_id}",  # Group by guest
+)
+class BatchMessageProcessor:
+    class Context(BaseModel):
+        guest_id: int
+        message_count: int = 0
+
+    @classmethod
+    def create_context(cls, events=None):  # Note: events parameter
+        """Receives all debounced events."""
+        guest = events[0].entity.guest
+        return cls.Context(
+            guest_id=guest.id,
+            message_count=len(events),
+        )
+
+    @step(start=True)
+    def process_messages(self):
+        # Process batch of messages
+        return complete()
+```
+
+### Debouncing with Agent `@handler`
+
+```python
+from datetime import timedelta
+from pydantic import BaseModel
+from django_ai.automation.agents.core import agent, handler
+
+@agent(
+    "reservation_agent",
+    spawn_on="reservation_created",
+    match={"id": "{{ ctx.reservation_id }}"},
+)
+class ReservationAgent:
+    class Context(BaseModel):
+        reservation_id: int
+        update_count: int = 0
+
+    @classmethod
+    def create_context(cls, event):
+        return cls.Context(reservation_id=event.entity.id)
+
+    @handler(
+        "reservation_updated",
+        debounce=timedelta(seconds=30),
+        debounce_key="{entity.id}",
+    )
+    def handle_updates(self, context, events):  # Note: events parameter
+        """Called once with all updates from debounce window."""
+        context.update_count = len(events)
+        # Sync latest state to external system
+        sync_to_pms(events[-1].entity)
+```
+
+### Debounce Key Templates
+
+The `debounce_key` parameter uses Django template syntax to generate grouping keys:
+
+```python
+# Group by entity ID (default behavior)
+debounce_key="{entity.id}"
+
+# Group by related object
+debounce_key="{entity.guest.id}"
+
+# Group by event name and entity
+debounce_key="{event.event_name}:{entity.id}"
+
+# Fixed key (all events grouped together)
+debounce_key="fixed_key"
+```
+
+**Available template variables:**
+- `entity` - the event's related model instance (`event.entity`)
+- `event` - the Event model itself
+
+### How Debouncing Works
+
+1. First event arrives → record created with `scheduled_at = now + delay`
+2. More events arrive with same key → `scheduled_at` pushed forward, event IDs accumulated
+3. No new events for full delay period → handler/workflow fires with all events
+4. Record deleted after execution
+
+```
+Event 1 ──┐
+Event 2 ──┼── (debounce window resets each time) ── delay ── Handler fires with [1,2,3]
+Event 3 ──┘
+```
+
+---
+
+## 10) Cheatsheet
 
 * Immediate: `EventDefinition("name", condition=...)`
 * Scheduled: `EventDefinition("name", date_field="dt", condition=...)`
+* Dynamic name: `EventDefinition("task_completed:{{ instance.task_type }}")`
 * Single-step: `@on_event("name") def handler(event): obj = event.entity`
 * Workflow (offsets): `@event_workflow("name", offset=timedelta(...))`
 * Agent: `@agent("name", spawn_on="event", match={"field": "{{ ctx.value }}"})`
 * Handler: `@handler("event", offset=timedelta(...), match={...})`
+* Debounce: `@on_event("name", debounce=timedelta(seconds=30), debounce_key="{entity.id}") def handler(events): ...`
+* Debounced workflow: `@event_workflow("name", debounce=timedelta(...), debounce_key="{entity.id}")` + `create_context(cls, events=...)`
 * Control flows: `goto`, `sleep`,
   `wait_for_event("EventName", timeout, on_timeout)`,
   `wait("custom:signal", timeout, on_timeout)`,

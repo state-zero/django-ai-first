@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from ..events.models import Event, EventStatus
 from ..events.definitions import EventDefinition, EventTrigger
-from tests.models import TestBooking, TestOrder, TestProperty, TestModelWithoutEvents, TestUUIDModel, TestTriggerModel, TestWatchFieldsModel, Guest, Booking
+from tests.models import TestBooking, TestOrder, TestProperty, TestModelWithoutEvents, TestUUIDModel, TestTriggerModel, TestWatchFieldsModel, TestTemplatedEventModel, Guest, Booking
 
 class EventDefinitionTest(TestCase):
     """Test the EventDefinition helper class functionality"""
@@ -2506,3 +2506,145 @@ class DebouncedOnEventCallbackTest(TransactionTestCase):
         # Should have been called immediately
         self.assertEqual(len(received_events), 1)
         self.assertEqual(received_events[0].id, event.id)
+
+
+class TemplatedEventNameTest(TransactionTestCase):
+    """Test templated event names (e.g., 'task_completed:{{ instance.task_type }}')"""
+
+    def setUp(self):
+        from django_ai.automation.events.callbacks import callback_registry
+        callback_registry.clear()
+
+    def tearDown(self):
+        from django_ai.automation.events.callbacks import callback_registry
+        callback_registry.clear()
+
+    def test_event_definition_get_name_static(self):
+        """Test get_name returns static name unchanged"""
+        event_def = EventDefinition("task_created")
+        instance = TestTemplatedEventModel(task_type="review", status="pending")
+
+        self.assertEqual(event_def.get_name(instance), "task_created")
+        self.assertEqual(event_def.name, "task_created")
+
+    def test_event_definition_get_name_templated(self):
+        """Test get_name renders template with instance fields"""
+        event_def = EventDefinition("task_completed:{{ instance.task_type }}")
+        instance = TestTemplatedEventModel(task_type="review", status="completed")
+
+        # get_name should render the template
+        self.assertEqual(event_def.get_name(instance), "task_completed:review")
+        # name property should return raw template
+        self.assertEqual(event_def.name, "task_completed:{{ instance.task_type }}")
+
+    def test_event_created_with_rendered_name(self):
+        """Test that Event is created with rendered event name"""
+        instance = TestTemplatedEventModel.objects.create(
+            task_type="approval",
+            status="completed",
+        )
+
+        # Check events were created
+        events = Event.objects.filter(
+            model_type=ContentType.objects.get_for_model(TestTemplatedEventModel),
+            entity_id=str(instance.id),
+        )
+
+        event_names = set(events.values_list("event_name", flat=True))
+        # Should have static event and templated event with rendered name
+        self.assertIn("task_created", event_names)
+        self.assertIn("task_completed:approval", event_names)
+
+    def test_handler_receives_templated_event(self):
+        """Test that handler registered for rendered event name gets called"""
+        from django_ai.automation.events.callbacks import on_event
+
+        callback_log = []
+
+        # Register handler for specific rendered event name
+        @on_event(event_name="task_completed:review")
+        def on_review_completed(event):
+            callback_log.append(f"review:{event.entity_id}")
+
+        @on_event(event_name="task_completed:approval")
+        def on_approval_completed(event):
+            callback_log.append(f"approval:{event.entity_id}")
+
+        # Create a "review" task that's completed
+        review_task = TestTemplatedEventModel.objects.create(
+            task_type="review",
+            status="completed",
+        )
+
+        # Only review handler should fire
+        self.assertEqual(len(callback_log), 1)
+        self.assertIn(f"review:{review_task.id}", callback_log)
+
+        # Create an "approval" task that's completed
+        callback_log.clear()
+        approval_task = TestTemplatedEventModel.objects.create(
+            task_type="approval",
+            status="completed",
+        )
+
+        # Only approval handler should fire
+        self.assertEqual(len(callback_log), 1)
+        self.assertIn(f"approval:{approval_task.id}", callback_log)
+
+    def test_handler_does_not_receive_wrong_templated_event(self):
+        """Test that handler for different rendered name is NOT called"""
+        from django_ai.automation.events.callbacks import on_event
+
+        callback_log = []
+
+        @on_event(event_name="task_completed:billing")
+        def on_billing_completed(event):
+            callback_log.append(f"billing:{event.entity_id}")
+
+        # Create a "review" task - billing handler should NOT fire
+        TestTemplatedEventModel.objects.create(
+            task_type="review",
+            status="completed",
+        )
+
+        self.assertEqual(len(callback_log), 0)
+
+    def test_event_definition_lookup_works_with_template(self):
+        """Test that _get_event_definition finds the correct definition"""
+        instance = TestTemplatedEventModel.objects.create(
+            task_type="support",
+            status="completed",
+        )
+
+        event = Event.objects.get(
+            model_type=ContentType.objects.get_for_model(TestTemplatedEventModel),
+            entity_id=str(instance.id),
+            event_name="task_completed:support",
+        )
+
+        # Should find the event definition
+        event_def = event._get_event_definition()
+        self.assertIsNotNone(event_def)
+        self.assertEqual(event_def.name, "task_completed:{{ instance.task_type }}")
+
+    def test_different_instances_get_different_event_names(self):
+        """Test that different instances create events with different rendered names"""
+        task1 = TestTemplatedEventModel.objects.create(task_type="typeA", status="completed")
+        task2 = TestTemplatedEventModel.objects.create(task_type="typeB", status="completed")
+
+        ct = ContentType.objects.get_for_model(TestTemplatedEventModel)
+
+        # Each should have its own rendered event name
+        event1 = Event.objects.filter(
+            model_type=ct,
+            entity_id=str(task1.id),
+            event_name="task_completed:typeA",
+        ).exists()
+        event2 = Event.objects.filter(
+            model_type=ct,
+            entity_id=str(task2.id),
+            event_name="task_completed:typeB",
+        ).exists()
+
+        self.assertTrue(event1, "task1 should have event 'task_completed:typeA'")
+        self.assertTrue(event2, "task2 should have event 'task_completed:typeB'")

@@ -323,6 +323,7 @@ def event_workflow(
     ignores_claims: bool = False,
     debounce: Optional[timedelta] = None,
     debounce_key: Optional[str] = None,
+    namespace: str = "*",
 ):
     """
     Decorator for workflows triggered by events.
@@ -344,6 +345,7 @@ def event_workflow(
         debounce_key: Template for debounce key. Uses {entity.field} syntax.
                      Example: "{entity.primary_guest.id}" groups by guest.
                      If not set, defaults to entity_id.
+        namespace: Event namespace to filter on. Use "*" (default) to match all.
     """
 
     def decorator(cls):
@@ -429,6 +431,7 @@ def event_workflow(
         cls._on_fail_handler = on_fail_handler
         cls._debounce = debounce
         cls._debounce_key = debounce_key
+        cls._namespace = namespace
 
         # Register in both places
         _workflows[workflow_name] = cls
@@ -621,6 +624,11 @@ class WorkflowEngine:
             pass
 
         for workflow_cls in _event_workflows[event.event_name]:
+            # Check namespace filter
+            workflow_namespace = getattr(workflow_cls, "_namespace", "*")
+            if workflow_namespace != "*" and workflow_namespace != event.namespace:
+                continue
+
             # Check if workflow should run for this event
             if hasattr(workflow_cls, "should_run_for_event"):
                 if not workflow_cls.should_run_for_event(event):

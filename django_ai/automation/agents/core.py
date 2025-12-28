@@ -55,6 +55,7 @@ class HandlerInfo:
     match: Optional[MatchDict] = None
     debounce: Optional[timedelta] = None
     debounce_key: Optional[str] = None
+    namespace: str = "*"
 
 
 # Registry for agents and their handlers
@@ -173,6 +174,7 @@ def handler(
     match: Optional[MatchDict] = None,
     debounce: Optional[timedelta] = None,
     debounce_key: Optional[str] = None,
+    namespace: str = "*",
 ):
     """
     Decorator to mark a method as an event handler within an agent.
@@ -187,6 +189,7 @@ def handler(
         match: Dict mapping entity fields to context fields for routing.
                Format: {entity_field: ctx.context_field}
                Supports Django __ syntax for nested fields.
+        namespace: Event namespace to filter on. Use "*" (default) to match all.
         debounce: If set, debounce handler executions by this duration.
                  Multiple events within this window are collected and
                  passed to the handler as `events` (list) instead of `event`.
@@ -244,6 +247,7 @@ def handler(
         func._handler_match = match
         func._handler_debounce = debounce
         func._handler_debounce_key = debounce_key
+        func._handler_namespace = namespace
         return func
     return decorator
 
@@ -253,6 +257,7 @@ def agent(
     spawn_on: str,
     match: Optional[MatchDict] = None,
     singleton: bool = True,
+    namespace: str = "*",
 ):
     """
     Agent decorator for handler-based agents.
@@ -265,6 +270,7 @@ def agent(
                Supports Django __ syntax for nested fields.
                Used for singleton checks and event routing.
         singleton: If True (default), only one agent per context match.
+        namespace: Event namespace to filter spawn_on events. Use "*" (default) to match all.
 
     Required class members:
         - Context: Pydantic BaseModel defining agent state
@@ -323,6 +329,7 @@ def agent(
         cls._spawn_on = spawn_on
         cls._singleton = singleton
         cls._default_match = match
+        cls._namespace = namespace
 
         # Collect all handler methods
         handlers = []
@@ -339,6 +346,7 @@ def agent(
                     match=getattr(attr, "_handler_match", None),
                     debounce=getattr(attr, "_handler_debounce", None),
                     debounce_key=getattr(attr, "_handler_debounce_key", None),
+                    namespace=getattr(attr, "_handler_namespace", "*"),
                 )
                 handlers.append(handler_info)
 
@@ -349,7 +357,7 @@ def agent(
         _agent_handlers[name] = handlers
 
         # Register spawn event handler
-        _register_spawn_handler(name, spawn_on, singleton, cls)
+        _register_spawn_handler(name, spawn_on, singleton, namespace, cls)
 
         # Register handlers for each unique event+offset combination
         registered_events = set()
@@ -397,11 +405,12 @@ def _register_spawn_handler(
     agent_name: str,
     event_name: str,
     singleton: bool,
+    event_namespace: str,
     agent_class: type,
 ):
     """Register callback to spawn agent when spawn_on event occurs"""
 
-    @on_event(event_name=event_name, namespace="*")
+    @on_event(event_name=event_name, namespace=event_namespace)
     def handle_spawn_event(event):
         # Create context first - we need it for singleton check and creation
         context = agent_class.create_context(event)
@@ -459,7 +468,7 @@ def _register_event_handler(
     """
     @on_event(
         event_name=handler_info.event_name,
-        namespace="*",
+        namespace=handler_info.namespace,
         offset=handler_info.offset,
     )
     def handle_event_for_handler(event):

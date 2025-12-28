@@ -252,3 +252,22 @@ class TestWatchFieldsModel(models.Model):
             watch_fields=["status", "priority"],
         ),
     ]
+
+
+class TestTemplatedEventModel(models.Model):
+    """Test model for templated event names"""
+    task_type = models.CharField(max_length=50)
+    status = models.CharField(max_length=20, default="pending")
+
+    events = [
+        # Static event name (for comparison)
+        EventDefinition(
+            "task_created",
+            condition=lambda instance: True,
+        ),
+        # Templated event name - includes task_type from the model
+        EventDefinition(
+            "task_completed:{{ instance.task_type }}",
+            condition=lambda instance: instance.status == "completed",
+        ),
+    ]

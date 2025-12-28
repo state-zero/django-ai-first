@@ -168,11 +168,14 @@ class EventManager(models.Manager):
             # Get current watched values hash (None if no watch_fields defined)
             current_watched = event_def.get_watched_values_hash(instance)
 
+            # Render event name from template (supports {{ instance.field }} syntax)
+            event_name = event_def.get_name(instance)
+
             # Always create event records (for tracking), but only fire based on trigger
             event, created = self.get_or_create(
                 model_type=content_type,
                 entity_id=str(instance.pk),
-                event_name=event_def.name,
+                event_name=event_name,
                 namespace=event_def.get_namespace(instance)
             )
 
@@ -355,7 +358,8 @@ class Event(models.Model):
             entity = self.entity
             if hasattr(entity.__class__, "events"):
                 for event_def in entity.__class__.events:
-                    if event_def.name == self.event_name:
+                    # Compare rendered name (handles templates like "task:{{ instance.pk }}")
+                    if event_def.get_name(entity) == self.event_name:
                         return event_def
         except Exception:
             pass

@@ -10,6 +10,28 @@ class EventTrigger(models.TextChoices):
     DELETE = "delete", "Delete"   # Fire on deletion
 
 
+def _render_event_template(template_str: str, instance) -> str:
+    """
+    Render an event template string against a model instance.
+
+    Instance is available as 'instance' in templates, e.g. "{{ instance.pk }}".
+
+    Args:
+        template_str: Template like "task_completed:{{ instance.task_id }}"
+        instance: The model instance
+
+    Returns:
+        Rendered string value
+    """
+    # Fast path: if no template syntax, return as-is
+    if "{{" not in template_str:
+        return template_str
+
+    from django.template import Template, Context
+    template = Template(template_str)
+    return template.render(Context({"instance": instance})).strip()
+
+
 class EventDefinition:
 
     def __init__(
@@ -21,7 +43,7 @@ class EventDefinition:
         trigger: Union[EventTrigger, List[EventTrigger]] = EventTrigger.CREATE,
         watch_fields: Optional[List[str]] = None,
     ) -> None:
-        self.name = name
+        self._name = name
         self.date_field = date_field  # None for immediate events
         self.condition = condition or (lambda instance: True)
         self._namespace = namespace
@@ -35,6 +57,23 @@ class EventDefinition:
             raise ValueError(
                 f"trigger must be an EventTrigger or List[EventTrigger], got {type(trigger)}"
             )
+
+    @property
+    def name(self) -> str:
+        """Return raw name template (for backward compatibility and lookups)"""
+        return self._name
+
+    def get_name(self, instance: models.Model) -> str:
+        """
+        Get the event name for a given model instance.
+
+        Supports Django template syntax for dynamic event names, e.g.:
+            "task_completed:{{ instance.pk }}"
+            "order_{{ instance.status }}"
+
+        The model instance is available as 'instance' in the template.
+        """
+        return _render_event_template(self._name, instance)
 
     def get_namespace(self, instance: models.Model) -> str:
         """Get the namespace for this event given a model instance"""
