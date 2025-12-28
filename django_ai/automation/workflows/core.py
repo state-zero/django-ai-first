@@ -897,6 +897,16 @@ class WorkflowEngine:
             run.wake_at = timezone.now() + result.duration
             run.save()
 
+            # Schedule timer for precise wake-up.
+            # Include wake_at to detect stale timers (workflow may have slept again).
+            # wake_at field remains as fallback if timer fails (cache cleared, etc.)
+            from ..timers.core import schedule_task
+            schedule_task(
+                "django_ai.automation.queues.tasks.wake_workflow",
+                args=[run.id, run.wake_at.isoformat()],
+                delay=result.duration,
+            )
+
         elif isinstance(result, Complete):
             StepExecution.objects.create(
                 workflow_run=run,

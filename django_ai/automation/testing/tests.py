@@ -119,10 +119,12 @@ class TestTimeMachineWithWorkflows(TransactionTestCase):
         # Clear registries
         from django_ai.automation.workflows.core import _workflows, _event_workflows
         from django_ai.automation.events.callbacks import callback_registry
+        from django_ai.automation.timers.core import clear_pending_tasks
 
         _workflows.clear()
         _event_workflows.clear()
         callback_registry.clear()
+        clear_pending_tasks()
 
         from django_ai.automation.workflows.integration import handle_event_for_workflows
 

@@ -46,6 +46,7 @@ INSTALLED_APPS = [
     "django_ai.automation.queues",
     "django_ai.automation.workflows",
     "django_ai.automation.agents",
+    "django_ai.automation.timers",
     "django_ai.conversations",
     "django_ai.files",
     "django_ai.tables",
@@ -156,3 +157,10 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Django AI settings
+# Set TIMERS_IN_PROCESS=True for local dev (background thread executes tasks)
+# Set TIMERS_IN_PROCESS=False for production (requires 'python manage.py run_timers')
+DJANGO_AI = {
+    'TIMERS_IN_PROCESS': True,  # Execute timed tasks via background thread
+}

@@ -43,6 +43,10 @@ class WorkflowTestCase(TestCase):
     """Base test case with common setup"""
 
     def setUp(self):
+        # Clear any pending timers from previous tests
+        from django_ai.automation.timers.core import clear_pending_tasks
+        clear_pending_tasks()
+
         self.executor = MockExecutor()
         engine.set_executor(self.executor)
 
@@ -52,6 +56,10 @@ class WorkflowTestCase(TestCase):
 
         _workflows.clear()
         _event_workflows.clear()
+
+        # Clear any pending timers
+        from django_ai.automation.timers.core import clear_pending_tasks
+        clear_pending_tasks()
 
 
 class TestBasicWorkflow(WorkflowTestCase):
