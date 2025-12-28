@@ -169,6 +169,9 @@ class TimeMachine:
 
         stats = ProcessingStats()
 
+        # Process delayed tasks via executor
+        self._process_delayed_tasks()
+
         # Process due events
         result = event_processor.process_due_events(lookback_hours=24)
         stats.events_processed = result.get("events_processed", 0)
@@ -202,6 +205,15 @@ class TimeMachine:
         self.stats.handlers_executed += stats.handlers_executed
 
         return stats
+
+    def _process_delayed_tasks(self) -> int:
+        """Process delayed tasks via the executor interface."""
+        from django_ai.automation.workflows.core import engine
+
+        executor = engine.get_executor()
+        if hasattr(executor, "process_delayed_tasks"):
+            return executor.process_delayed_tasks(self._now())
+        return 0
 
     def run_until_idle(self, max_iterations: int = 100) -> ProcessingStats:
         """

@@ -53,6 +53,8 @@ class HandlerInfo:
     retry: Optional[Retry] = None
     ignores_claims: bool = False
     match: Optional[MatchDict] = None
+    debounce: Optional[timedelta] = None
+    debounce_key: Optional[str] = None
 
 
 # Registry for agents and their handlers
@@ -169,6 +171,8 @@ def handler(
     retry: Optional[Retry] = None,
     ignores_claims: bool = False,
     match: Optional[MatchDict] = None,
+    debounce: Optional[timedelta] = None,
+    debounce_key: Optional[str] = None,
 ):
     """
     Decorator to mark a method as an event handler within an agent.
@@ -183,6 +187,12 @@ def handler(
         match: Dict mapping entity fields to context fields for routing.
                Format: {entity_field: ctx.context_field}
                Supports Django __ syntax for nested fields.
+        debounce: If set, debounce handler executions by this duration.
+                 Multiple events within this window are collected and
+                 passed to the handler as `events` (list) instead of `event`.
+        debounce_key: Template for debounce key. Uses {entity.field} syntax.
+                     Example: "{entity.primary_guest.id}" groups by guest.
+                     If not set, defaults to agent_run_id + handler_name.
 
     Example:
         from django_ai.automation.agents import handler, ctx
@@ -201,11 +211,29 @@ def handler(
         def audit_all(self, context):
             # Always runs, even when another flow claims this event
             pass
+
+        @handler("booking_updated", debounce=timedelta(seconds=30), debounce_key="{entity.id}")
+        def handle_updates(self, context, events):
+            # Receives list of all events within 30s window
+            for event in events:
+                process(event)
     """
     def decorator(func):
         # Validate match in debug mode
         if match:
             _validate_match(event_name, match)
+
+        # Validate handler signature when debounce is enabled
+        if debounce is not None:
+            import inspect
+            sig = inspect.signature(func)
+            params = list(sig.parameters.keys())
+            # Should have self, context, events
+            if 'events' not in params:
+                raise ValueError(
+                    f"Handler '{func.__name__}' with debounce must have 'events' parameter "
+                    f"to receive the list of debounced events. Got parameters: {params}"
+                )
 
         func._is_handler = True
         func._handler_event_name = event_name
@@ -214,6 +242,8 @@ def handler(
         func._handler_retry = retry
         func._handler_ignores_claims = ignores_claims
         func._handler_match = match
+        func._handler_debounce = debounce
+        func._handler_debounce_key = debounce_key
         return func
     return decorator
 
@@ -307,6 +337,8 @@ def agent(
                     retry=attr._handler_retry,
                     ignores_claims=getattr(attr, "_handler_ignores_claims", False),
                     match=getattr(attr, "_handler_match", None),
+                    debounce=getattr(attr, "_handler_debounce", None),
+                    debounce_key=getattr(attr, "_handler_debounce_key", None),
                 )
                 handlers.append(handler_info)
 
@@ -569,6 +601,11 @@ class AgentEngine:
             # If entity is deleted or claim check fails, continue with scheduling
             pass
 
+        # Check if handler uses debounce
+        if handler_info and handler_info.debounce is not None:
+            self._debounce_handler(agent_run, handler_info, event)
+            return None  # No HandlerExecution created yet - will be created when debounce fires
+
         # Calculate scheduled time based on event.at and offset
         if hasattr(event, 'at') and event.at:
             scheduled_at = event.at + offset
@@ -592,6 +629,70 @@ class AgentEngine:
             self._queue_handler_execution(execution.id)
 
         return execution
+
+    def _debounce_handler(self, agent_run: AgentRun, handler_info: HandlerInfo, event):
+        """Schedule a debounced handler execution"""
+        from ..queues.debounce import resolve_debounce_key
+
+        template = handler_info.debounce_key or "{entity.id}"
+        debounce_key = f"handler:{agent_run.agent_name}:{handler_info.method_name}:" + resolve_debounce_key(template, event)
+
+        self.executor.debounce_task(
+            debounce_key,
+            "execute_handler_for_events",
+            agent_run.id,
+            handler_info.method_name,
+            delay=handler_info.debounce,
+            event_id=event.id,
+        )
+
+    def execute_handler_for_events(self, agent_run_id: int, handler_name: str, events: list):
+        """Execute a handler with multiple events (from debounce)"""
+        try:
+            agent_run = AgentRun.objects.get(id=agent_run_id)
+        except AgentRun.DoesNotExist:
+            return
+
+        if agent_run.status != AgentStatus.ACTIVE or not events:
+            return
+
+        agent_class = _agents.get(agent_run.agent_name)
+        if not agent_class:
+            return
+
+        # Find handler info
+        handler_info = next((h for h in agent_class._handlers if h.method_name == handler_name), None)
+        if not handler_info:
+            return
+
+        # Create execution record
+        execution = HandlerExecution.objects.create(
+            agent_run=agent_run,
+            handler_name=handler_name,
+            event_name=events[-1].event_name,
+            event_id=events[-1].id,
+            offset=handler_info.offset,
+            status=HandlerStatus.RUNNING,
+            scheduled_at=timezone.now(),
+            started_at=timezone.now(),
+        )
+
+        try:
+            context = agent_class.Context.model_validate(agent_run.context)
+            agent_instance = agent_class()
+            handler_method = getattr(agent_instance, handler_name)
+            handler_method(context, events=events)
+
+            agent_run.context = context.model_dump()
+            agent_run.save()
+            execution.status = HandlerStatus.COMPLETED
+            execution.completed_at = timezone.now()
+            execution.save()
+        except Exception as e:
+            execution.status = HandlerStatus.FAILED
+            execution.error = str(e)
+            execution.completed_at = timezone.now()
+            execution.save()
 
     def _queue_handler_execution(self, execution_id: int, delay: Optional[timedelta] = None):
         """Queue a handler execution for processing"""

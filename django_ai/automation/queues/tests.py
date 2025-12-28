@@ -300,3 +300,429 @@ class TestEndToEndIntegration(TransactionTestCase):
 
             ev.refresh_from_db()
             self.assertEqual(ev.status, EventStatus.PENDING)
+
+
+@override_settings(SKIP_Q2_AUTOSCHEDULE=True)
+class TestDebounce(TransactionTestCase):
+    """Tests for the debounce mechanism."""
+
+    def setUp(self):
+        self.executor = SynchronousExecutor()
+        engine.set_executor(self.executor)
+
+    def test_debounce_single_call_executes_after_delay(self):
+        """A single debounced task executes after the delay."""
+        execution_log = []
+
+        # Manually track what gets executed
+        def mock_execute(task_name, args, events=None):
+            execution_log.append((task_name, args, events))
+
+        self.executor._execute_task = mock_execute
+
+        # Debounce a task
+        self.executor.debounce_task(
+            "test-key",
+            "poll_due_events",
+            24,
+            delay=timedelta(seconds=30),
+            event_id=1,
+        )
+
+        # Task should not have executed yet
+        self.assertEqual(len(execution_log), 0)
+
+        # Process at current time - nothing due yet
+        self.executor.process_debounced_tasks(timezone.now())
+        self.assertEqual(len(execution_log), 0)
+
+        # Process after delay - now it should execute
+        self.executor.process_debounced_tasks(timezone.now() + timedelta(seconds=31))
+        self.assertEqual(len(execution_log), 1)
+        self.assertEqual(execution_log[0][0], "poll_due_events")
+
+    def test_debounce_multiple_calls_accumulate_events(self):
+        """Multiple debounced calls with same key accumulate events."""
+        execution_log = []
+
+        def mock_execute(task_name, args, events=None):
+            execution_log.append((task_name, args, events))
+
+        self.executor._execute_task = mock_execute
+
+        # First call
+        self.executor.debounce_task(
+            "test-key",
+            "poll_due_events",
+            24,
+            delay=timedelta(seconds=30),
+            event_id=1,
+        )
+
+        # Second call - should push delay forward and accumulate event
+        self.executor.debounce_task(
+            "test-key",
+            "poll_due_events",
+            24,
+            delay=timedelta(seconds=30),
+            event_id=2,
+        )
+
+        # Third call
+        self.executor.debounce_task(
+            "test-key",
+            "poll_due_events",
+            24,
+            delay=timedelta(seconds=30),
+            event_id=3,
+        )
+
+        # Check accumulated events
+        task_info = self.executor._debounced_tasks["test-key"]
+        self.assertEqual(task_info.event_ids, [1, 2, 3])
+
+    def test_debounce_resets_scheduled_time(self):
+        """Each debounce call resets the scheduled time."""
+        # First call
+        self.executor.debounce_task(
+            "test-key",
+            "poll_due_events",
+            24,
+            delay=timedelta(seconds=30),
+            event_id=1,
+        )
+
+        first_scheduled = self.executor._debounced_tasks["test-key"].scheduled_at
+
+        # Wait a bit (simulate time passing)
+        import time
+        time.sleep(0.01)
+
+        # Second call
+        self.executor.debounce_task(
+            "test-key",
+            "poll_due_events",
+            24,
+            delay=timedelta(seconds=30),
+            event_id=2,
+        )
+
+        second_scheduled = self.executor._debounced_tasks["test-key"].scheduled_at
+
+        # Second scheduled time should be later
+        self.assertGreater(second_scheduled, first_scheduled)
+
+    def test_debounce_different_keys_independent(self):
+        """Different debounce keys are tracked independently."""
+        self.executor.debounce_task(
+            "key-1",
+            "poll_due_events",
+            24,
+            delay=timedelta(seconds=30),
+            event_id=1,
+        )
+
+        self.executor.debounce_task(
+            "key-2",
+            "cleanup_old_events",
+            7,
+            delay=timedelta(seconds=30),
+            event_id=2,
+        )
+
+        self.assertEqual(len(self.executor._debounced_tasks), 2)
+        self.assertIn("key-1", self.executor._debounced_tasks)
+        self.assertIn("key-2", self.executor._debounced_tasks)
+
+        # Check they have different task names
+        self.assertEqual(
+            self.executor._debounced_tasks["key-1"].task_name, "poll_due_events"
+        )
+        self.assertEqual(
+            self.executor._debounced_tasks["key-2"].task_name, "cleanup_old_events"
+        )
+
+    def test_debounce_duplicate_event_ids_not_added(self):
+        """Same event ID is not added multiple times."""
+        self.executor.debounce_task(
+            "test-key",
+            "poll_due_events",
+            24,
+            delay=timedelta(seconds=30),
+            event_id=1,
+        )
+
+        # Same event ID again
+        self.executor.debounce_task(
+            "test-key",
+            "poll_due_events",
+            24,
+            delay=timedelta(seconds=30),
+            event_id=1,
+        )
+
+        task_info = self.executor._debounced_tasks["test-key"]
+        self.assertEqual(task_info.event_ids, [1])  # Not [1, 1]
+
+
+@override_settings(SKIP_Q2_AUTOSCHEDULE=True)
+class TestDebouncedWorkflows(TransactionTestCase):
+    """Tests for debounced event workflows."""
+
+    def setUp(self):
+        self.executor = SynchronousExecutor()
+        engine.set_executor(self.executor)
+
+        from ..workflows.core import _workflows, _event_workflows
+        from ..events.callbacks import callback_registry
+
+        _workflows.clear()
+        _event_workflows.clear()
+        callback_registry.clear()
+
+        from ..workflows.integration import handle_event_for_workflows
+        callback_registry.register(
+            handle_event_for_workflows, event_name="*", namespace="*"
+        )
+
+    def test_debounced_workflow_validation_requires_events_param(self):
+        """Workflow with debounce must have create_context(events=...)."""
+        with self.assertRaises(ValueError) as ctx:
+            @event_workflow(
+                event_name="test_evt",
+                debounce=timedelta(seconds=30),
+            )
+            class BadWorkflow:
+                class Context(BaseModel):
+                    count: int = 0
+
+                @classmethod
+                def create_context(cls, event=None):  # Wrong: should be events
+                    return cls.Context()
+
+                @step(start=True)
+                def start(self):
+                    return complete()
+
+        self.assertIn("events", str(ctx.exception))
+
+    def test_debounced_workflow_accumulates_events(self):
+        """Debounced workflow receives all events when it fires."""
+        received_events = []
+
+        @event_workflow(
+            event_name="debounce_test_evt",
+            debounce=timedelta(seconds=30),
+            debounce_key="{entity.id}",
+        )
+        class DebouncedWF:
+            class Context(BaseModel):
+                event_count: int = 0
+
+            @classmethod
+            def create_context(cls, events=None):
+                received_events.extend(events or [])
+                return cls.Context(event_count=len(events or []))
+
+            @step(start=True)
+            def start(self):
+                return complete()
+
+        with time_machine() as tm:
+            # Create 3 objects, each with its own event (different entity_ids)
+            ct = ContentType.objects.get_for_model(ITImmediate)
+            objs = [ITImmediate.objects.create(flag=True) for _ in range(3)]
+
+            for obj in objs:
+                ev = Event.objects.create(
+                    model_type=ct,
+                    entity_id=str(obj.pk),
+                    event_name="debounce_test_evt",
+                    status=EventStatus.PROCESSED,
+                )
+                # Trigger the event handling
+                engine.handle_event_occurred(ev)
+
+            # No workflow started yet (debounced) - but we have 3 different keys
+            # Each entity has its own debounce key, so we should have 3 pending
+            runs = WorkflowRun.objects.filter(name__contains="debounce_test_evt")
+            self.assertEqual(runs.count(), 0)
+
+            # Advance past debounce delay
+            tm.advance(seconds=31)
+
+            # Now 3 workflows should have started (one per entity)
+            runs = WorkflowRun.objects.filter(name__contains="debounce_test_evt")
+            self.assertEqual(runs.count(), 3)
+
+    def test_debounced_workflow_same_key_accumulates(self):
+        """Events with same debounce key accumulate into one workflow."""
+        received_events = []
+
+        @event_workflow(
+            event_name="debounce_same_key_evt",
+            debounce=timedelta(seconds=30),
+            debounce_key="fixed_key",  # Same key for all events
+        )
+        class DebouncedSameKeyWF:
+            class Context(BaseModel):
+                event_count: int = 0
+
+            @classmethod
+            def create_context(cls, events=None):
+                received_events.extend(events or [])
+                return cls.Context(event_count=len(events or []))
+
+            @step(start=True)
+            def start(self):
+                return complete()
+
+        with time_machine() as tm:
+            ct = ContentType.objects.get_for_model(ITImmediate)
+
+            # Create 3 events with different entities but same debounce key
+            for i in range(3):
+                obj = ITImmediate.objects.create(flag=True)
+                ev = Event.objects.create(
+                    model_type=ct,
+                    entity_id=str(obj.pk),
+                    event_name="debounce_same_key_evt",
+                    status=EventStatus.PROCESSED,
+                )
+                engine.handle_event_occurred(ev)
+
+            # No workflow started yet (debounced)
+            runs = WorkflowRun.objects.filter(name__contains="debounce_same_key_evt")
+            self.assertEqual(runs.count(), 0)
+
+            # Advance past debounce delay
+            tm.advance(seconds=31)
+
+            # Only ONE workflow should have started (same key)
+            runs = WorkflowRun.objects.filter(name__contains="debounce_same_key_evt")
+            self.assertEqual(runs.count(), 1)
+            # Should have received all 3 events
+            self.assertEqual(runs.first().data["event_count"], 3)
+            self.assertEqual(len(received_events), 3)
+
+
+@override_settings(SKIP_Q2_AUTOSCHEDULE=True)
+class TestDebouncedHandlers(TransactionTestCase):
+    """Tests for debounced agent handlers."""
+
+    def setUp(self):
+        self.executor = SynchronousExecutor()
+        engine.set_executor(self.executor)
+
+        from ..agents.core import agent_engine, _agents, _agent_handlers
+        agent_engine.set_executor(self.executor)
+
+        _agents.clear()
+        _agent_handlers.clear()
+
+        from ..workflows.core import _workflows, _event_workflows
+        from ..events.callbacks import callback_registry
+
+        _workflows.clear()
+        _event_workflows.clear()
+        callback_registry.clear()
+
+    def test_debounced_handler_validation_requires_events_param(self):
+        """Handler with debounce must have events parameter."""
+        from ..agents.core import agent, handler
+
+        with self.assertRaises(ValueError) as ctx:
+            @agent(name="bad_agent", spawn_on="spawn_evt", match={"id": "{{ ctx.entity_id }}"})
+            class BadAgent:
+                class Context(BaseModel):
+                    entity_id: int
+
+                @classmethod
+                def create_context(cls, event):
+                    return cls.Context(entity_id=event.entity_id)
+
+                @handler("update_evt", debounce=timedelta(seconds=30))
+                def handle_update(self, context):  # Wrong: should have events param
+                    pass
+
+        self.assertIn("events", str(ctx.exception))
+
+    def test_debounced_handler_accumulates_events(self):
+        """Debounced handler receives all events when it fires."""
+        from ..agents.core import agent, handler, agent_engine, _register_event_handler
+        from ..agents.models import AgentRun, AgentStatus
+        from tests.models import TestBooking
+
+        received_events = []
+
+        @agent(
+            name="debounce_handler_agent",
+            spawn_on="booking_created",
+            match={"id": "{{ ctx.booking_id }}"}
+        )
+        class DebounceHandlerAgent:
+            class Context(BaseModel):
+                booking_id: int = 0
+                update_count: int = 0
+
+            @classmethod
+            def create_context(cls, event):
+                return cls.Context(booking_id=event.entity_id)
+
+            @handler(
+                "booking_updated",
+                debounce=timedelta(seconds=30),
+                debounce_key="{entity.id}",
+            )
+            def handle_updates(self, context, events):
+                received_events.extend(events)
+                context.update_count = len(events)
+
+        # Register the handler callbacks
+        for h in DebounceHandlerAgent._handlers:
+            _register_event_handler("debounce_handler_agent", h, DebounceHandlerAgent)
+
+        with time_machine() as tm:
+            ct = ContentType.objects.get_for_model(TestBooking)
+
+            # Create a booking and spawn the agent
+            booking = TestBooking.objects.create(
+                guest_name="Test Guest",
+                checkin_date=timezone.now() + timedelta(days=1),
+                checkout_date=timezone.now() + timedelta(days=3),
+                status="pending",
+            )
+            spawn_event = Event.objects.create(
+                model_type=ct,
+                entity_id=str(booking.pk),
+                event_name="booking_created",
+                status=EventStatus.PROCESSED,
+            )
+            agent_run = agent_engine.spawn("debounce_handler_agent", spawn_event)
+            self.assertIsNotNone(agent_run)
+
+            # Now fire multiple update events quickly
+            for i in range(3):
+                update_event = Event.objects.create(
+                    model_type=ct,
+                    entity_id=str(booking.pk),
+                    event_name="booking_updated",
+                    namespace=f"update_{i}",  # Different namespace to avoid unique constraint
+                    status=EventStatus.PROCESSED,
+                )
+                agent_engine.schedule_handler(
+                    "debounce_handler_agent",
+                    "handle_updates",
+                    update_event,
+                )
+
+            # Handler should not have executed yet (debounced)
+            self.assertEqual(len(received_events), 0)
+
+            # Advance past debounce delay
+            tm.advance(seconds=31)
+
+            # Now handler should have executed with all 3 events
+            self.assertEqual(len(received_events), 3)
+            agent_run.refresh_from_db()
+            self.assertEqual(agent_run.context["update_count"], 3)

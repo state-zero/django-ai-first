@@ -693,3 +693,165 @@ class TestTimeMachineEventWorkflowIntegration(TransactionTestCase):
 
             # Second handler should have completed for the followup
             self.assertIn(str(followup_ids[0]), second_handler_completed)
+
+
+@override_settings(SKIP_Q2_AUTOSCHEDULE=True)
+class TestTimeMachineDelayedTasks(TransactionTestCase):
+    """Test time machine processing of delayed executor tasks."""
+
+    def setUp(self):
+        from django_ai.automation.queues.sync_executor import SynchronousExecutor
+
+        self.executor = SynchronousExecutor()
+        engine.set_executor(self.executor)
+
+        from django_ai.automation.workflows.core import _workflows, _event_workflows
+        from django_ai.automation.events.callbacks import callback_registry
+
+        _workflows.clear()
+        _event_workflows.clear()
+        callback_registry.clear()
+
+    def test_delayed_task_not_executed_before_time_advance(self):
+        """Delayed tasks should not execute until time advances past their delay."""
+        from django_ai.automation.queues.sync_executor import SynchronousExecutor
+
+        # Use a fresh executor to test delayed task directly
+        executor = SynchronousExecutor()
+        executed = []
+
+        # Define a simple task function we can track
+        def track_execution(*args):
+            executed.append(args)
+
+        with time_machine() as tm:
+            # Manually add a delayed task to the executor
+            run_at = timezone.now() + timedelta(minutes=30)
+            executor._delayed_tasks.append((run_at, "test_task", ("arg1",)))
+
+            # Task should be queued but not executed
+            self.assertEqual(len(executed), 0)
+            self.assertEqual(len(executor._delayed_tasks), 1)
+
+            # Advance only 10 minutes - still shouldn't execute
+            count = executor.process_delayed_tasks(timezone.now())
+            self.assertEqual(count, 0)
+            self.assertEqual(len(executor._delayed_tasks), 1)
+
+            # Advance past the delay - should be ready to execute
+            tm.advance(minutes=35)
+            # The task is now due, but we need to verify it's detected as due
+            self.assertEqual(len(executor._delayed_tasks), 1)
+            due_tasks = [t for t in executor._delayed_tasks if t[0] <= timezone.now()]
+            self.assertEqual(len(due_tasks), 1)
+
+    def test_executor_process_delayed_tasks(self):
+        """SynchronousExecutor.process_delayed_tasks should execute due tasks."""
+        from django_ai.automation.queues.sync_executor import SynchronousExecutor
+
+        executor = SynchronousExecutor()
+        engine.set_executor(executor)
+
+        @workflow("delay_exec_test")
+        class DelayExecTestWF:
+            class Context(BaseModel):
+                executed: bool = False
+
+            @classmethod
+            def create_context(cls):
+                return cls.Context()
+
+            @step(start=True)
+            def do_work(self):
+                ctx = get_context()
+                ctx.executed = True
+                return complete()
+
+        with time_machine() as tm:
+            # Create workflow without starting it via engine (to avoid auto-execution)
+            run = WorkflowRun.objects.create(
+                name="delay_exec_test",
+                version=1,
+                current_step="do_work",
+                data={"executed": False},
+                status=WorkflowStatus.RUNNING,
+            )
+
+            # Queue execution with delay
+            executor.queue_task("execute_step", run.id, "do_work", delay=timedelta(minutes=30))
+
+            # Verify task is queued
+            self.assertEqual(len(executor._delayed_tasks), 1)
+            run.refresh_from_db()
+            self.assertFalse(run.data.get("executed"))
+
+            # Advance time and let time machine process
+            tm.advance(minutes=35)
+
+            # Task should have been processed
+            run.refresh_from_db()
+            self.assertTrue(run.data.get("executed"))
+            self.assertEqual(run.status, WorkflowStatus.COMPLETED)
+
+    def test_multiple_delayed_tasks_execute_when_due(self):
+        """Multiple delayed tasks should execute when their time comes."""
+        from django_ai.automation.queues.sync_executor import SynchronousExecutor
+
+        executor = SynchronousExecutor()
+        engine.set_executor(executor)
+
+        @workflow("multi_delay_test")
+        class MultiDelayTestWF:
+            class Context(BaseModel):
+                marker: str = ""
+
+            @classmethod
+            def create_context(cls, marker: str = ""):
+                return cls.Context(marker=marker)
+
+            @step(start=True)
+            def mark(self):
+                return complete()
+
+        with time_machine() as tm:
+            # Create three workflow runs without auto-execution
+            run1 = WorkflowRun.objects.create(
+                name="multi_delay_test", version=1, current_step="mark",
+                data={"marker": "first"}, status=WorkflowStatus.RUNNING,
+            )
+            run2 = WorkflowRun.objects.create(
+                name="multi_delay_test", version=1, current_step="mark",
+                data={"marker": "second"}, status=WorkflowStatus.RUNNING,
+            )
+            run3 = WorkflowRun.objects.create(
+                name="multi_delay_test", version=1, current_step="mark",
+                data={"marker": "third"}, status=WorkflowStatus.RUNNING,
+            )
+
+            # Queue with different delays
+            executor.queue_task("execute_step", run1.id, "mark", delay=timedelta(minutes=10))
+            executor.queue_task("execute_step", run2.id, "mark", delay=timedelta(minutes=20))
+            executor.queue_task("execute_step", run3.id, "mark", delay=timedelta(minutes=30))
+
+            self.assertEqual(len(executor._delayed_tasks), 3)
+
+            # Advance past first delay only
+            tm.advance(minutes=15)
+            run1.refresh_from_db()
+            run2.refresh_from_db()
+            run3.refresh_from_db()
+            self.assertEqual(run1.status, WorkflowStatus.COMPLETED)
+            self.assertEqual(run2.status, WorkflowStatus.RUNNING)
+            self.assertEqual(run3.status, WorkflowStatus.RUNNING)
+
+            # Advance past second delay
+            tm.advance(minutes=10)
+            run2.refresh_from_db()
+            run3.refresh_from_db()
+            self.assertEqual(run2.status, WorkflowStatus.COMPLETED)
+            self.assertEqual(run3.status, WorkflowStatus.RUNNING)
+
+            # Advance past third delay
+            tm.advance(minutes=10)
+            run3.refresh_from_db()
+            self.assertEqual(run3.status, WorkflowStatus.COMPLETED)

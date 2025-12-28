@@ -321,6 +321,8 @@ def event_workflow(
     version: str = "1",
     default_retry: Optional[Retry] = None,
     ignores_claims: bool = False,
+    debounce: Optional[timedelta] = None,
+    debounce_key: Optional[str] = None,
 ):
     """
     Decorator for workflows triggered by events.
@@ -336,6 +338,12 @@ def event_workflow(
         version: Workflow version string
         default_retry: Default retry policy for steps
         ignores_claims: If True, workflow runs regardless of event claims
+        debounce: If set, debounce workflow starts by this duration.
+                 Multiple events within this window are collected and
+                 passed to create_context as `events` (list).
+        debounce_key: Template for debounce key. Uses {entity.field} syntax.
+                     Example: "{entity.primary_guest.id}" groups by guest.
+                     If not set, defaults to entity_id.
     """
 
     def decorator(cls):
@@ -350,6 +358,23 @@ def event_workflow(
             )
         if not issubclass(cls.Context, BaseModel):
             raise ValueError(f"Event workflow Context must inherit from BaseModel")
+
+        # Validate create_context signature when debounce is enabled
+        if debounce is not None:
+            if not hasattr(cls, "create_context"):
+                raise ValueError(
+                    f"Event workflow '{event_name}' with debounce must define create_context(cls, events=...) "
+                    f"that accepts a list of events"
+                )
+            import inspect
+            sig = inspect.signature(cls.create_context)
+            params = list(sig.parameters.keys())
+            # Skip 'cls' for classmethod
+            if 'events' not in params:
+                raise ValueError(
+                    f"Event workflow '{event_name}' with debounce must have create_context(cls, events=...) "
+                    f"parameter to receive the list of debounced events. Got parameters: {params}"
+                )
 
         # Auto-generate create_context if not provided - event workflows use same method name
         if not hasattr(cls, "create_context"):
@@ -402,6 +427,8 @@ def event_workflow(
         cls._offset = offset
         cls._ignores_claims = ignores_claims
         cls._on_fail_handler = on_fail_handler
+        cls._debounce = debounce
+        cls._debounce_key = debounce_key
 
         # Register in both places
         _workflows[workflow_name] = cls
@@ -482,6 +509,10 @@ class WorkflowEngine:
     def set_executor(self, executor):
         """Set the task executor"""
         self.executor = executor
+
+    def get_executor(self):
+        """Get the current task executor"""
+        return self.executor
 
     def start(self, workflow_name: str, **kwargs) -> WorkflowRun:
         """Start a new workflow manually"""
@@ -603,8 +634,14 @@ class WorkflowEngine:
                 continue
 
             try:
-                run = self.start_for_event(event, workflow_cls)
-                workflows_started.append(run)
+                # Check if workflow uses debounce
+                debounce = getattr(workflow_cls, "_debounce", None)
+                if debounce is not None:
+                    self._debounce_workflow_start(event, workflow_cls)
+                    # Don't add to workflows_started - will start later
+                else:
+                    run = self.start_for_event(event, workflow_cls)
+                    workflows_started.append(run)
 
                 # If there's a matching claim, increment events_handled
                 if matching_claim:
@@ -616,6 +653,58 @@ class WorkflowEngine:
                 )
 
         return workflows_started
+
+    def _debounce_workflow_start(self, event, workflow_cls):
+        """Schedule a debounced workflow start"""
+        from ..queues.debounce import resolve_debounce_key
+
+        # Generate debounce key
+        template = workflow_cls._debounce_key or "{event.event_name}:{entity.id}"
+        debounce_key = f"workflow:{workflow_cls._workflow_name}:" + resolve_debounce_key(template, event)
+
+        self.executor.debounce_task(
+            debounce_key,
+            "start_workflow_for_events",
+            workflow_cls._workflow_name,
+            delay=workflow_cls._debounce,
+            event_id=event.id,
+        )
+
+    def start_for_events(self, workflow_name: str, events: list):
+        """Start a workflow with multiple events (from debounce)"""
+        workflow_cls = _workflows.get(workflow_name)
+        if not workflow_cls or not events:
+            return None
+
+        # Create context with events (plural)
+        initial_context = workflow_cls.create_context(events=events)
+        data = safe_model_dump(initial_context)
+
+        latest_event = events[-1]
+        data["_event_ids"] = [e.id for e in events]
+        data["_event_name"] = latest_event.event_name
+        data["_entity_id"] = latest_event.entity_id
+
+        run = WorkflowRun.objects.create(
+            name=workflow_cls._workflow_name,
+            version=workflow_cls._workflow_version,
+            current_step=workflow_cls._start_step,
+            data=data,
+            status=WorkflowStatus.RUNNING,
+            triggered_by_event_id=latest_event.id,
+        )
+
+        # Handle offset timing
+        if workflow_cls._offset != timedelta():
+            run_time = (latest_event.at or timezone.now()) + workflow_cls._offset
+            if run_time > timezone.now():
+                run.status = WorkflowStatus.WAITING
+                run.wake_at = run_time
+                run.save()
+                return run
+
+        self._queue_step(run.id, run.current_step)
+        return run
 
     def cancel(self, run_id: int):
         """Cancel a running workflow"""

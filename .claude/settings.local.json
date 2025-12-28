@@ -8,7 +8,9 @@
       "Bash(cat:*)",
       "Bash(python manage.py shell:*)",
       "Bash(find:*)",
-      "Bash(python manage.py migrate:*)"
+      "Bash(python manage.py migrate:*)",
+      "WebSearch",
+      "Bash(python manage.py check:*)"
     ],
     "deny": [],
     "ask": []
