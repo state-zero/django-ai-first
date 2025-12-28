@@ -41,6 +41,7 @@ INSTALLED_APPS = [
 
     "rest_framework",
     "statezero.adaptors.django",
+    "django_q",
 
     "django_ai.automation.events",
     "django_ai.automation.queues",

@@ -2351,6 +2351,7 @@ class DebouncedOnEventCallbackTest(TransactionTestCase):
         """Test that debounced callbacks receive accumulated events"""
         from ..events.callbacks import on_event, callback_registry
         from django.contrib.contenttypes.models import ContentType
+        from freezegun import freeze_time
 
         received_events = []
 
@@ -2362,11 +2363,13 @@ class DebouncedOnEventCallbackTest(TransactionTestCase):
         def handle_updates(events):
             received_events.extend(events)
 
+        initial_time = timezone.now()
+
         # Create a booking
         booking = TestBooking.objects.create(
             guest_name="Test Guest",
-            checkin_date=timezone.now() + timedelta(days=1),
-            checkout_date=timezone.now() + timedelta(days=3),
+            checkin_date=initial_time + timedelta(days=1),
+            checkout_date=initial_time + timedelta(days=3),
             status="pending",
         )
 
@@ -2394,30 +2397,32 @@ class DebouncedOnEventCallbackTest(TransactionTestCase):
             namespace="ns3",
         )
 
-        # Fire events - they should be debounced
-        from ..events.callbacks import EventPhase
-        callback_registry.notify(event1, EventPhase.OCCURRED)
-        callback_registry.notify(event2, EventPhase.OCCURRED)
-        callback_registry.notify(event3, EventPhase.OCCURRED)
+        with freeze_time(initial_time) as frozen_time:
+            # Fire events - they should be debounced
+            from ..events.callbacks import EventPhase
+            callback_registry.notify(event1, EventPhase.OCCURRED)
+            callback_registry.notify(event2, EventPhase.OCCURRED)
+            callback_registry.notify(event3, EventPhase.OCCURRED)
 
-        # Events should not have been processed yet
-        self.assertEqual(len(received_events), 0)
+            # Events should not have been processed yet
+            self.assertEqual(len(received_events), 0)
 
-        # Advance time past debounce window and process
-        future_time = timezone.now() + timedelta(minutes=10)
-        self.executor.process_debounced_tasks(future_time)
+            # Advance time past debounce window and process
+            frozen_time.tick(delta=timedelta(minutes=10))
+            self.executor.process_debounced_tasks(timezone.now())
 
-        # All 3 events should have been passed to the callback
-        self.assertEqual(len(received_events), 3)
-        event_ids = [e.id for e in received_events]
-        self.assertIn(event1.id, event_ids)
-        self.assertIn(event2.id, event_ids)
-        self.assertIn(event3.id, event_ids)
+            # All 3 events should have been passed to the callback
+            self.assertEqual(len(received_events), 3)
+            event_ids = [e.id for e in received_events]
+            self.assertIn(event1.id, event_ids)
+            self.assertIn(event2.id, event_ids)
+            self.assertIn(event3.id, event_ids)
 
     def test_debounced_callback_different_keys_separate(self):
         """Test that different debounce keys are tracked separately"""
         from ..events.callbacks import on_event, callback_registry
         from django.contrib.contenttypes.models import ContentType
+        from freezegun import freeze_time
 
         received_events = []
 
@@ -2429,16 +2434,18 @@ class DebouncedOnEventCallbackTest(TransactionTestCase):
         def handle_guest_action(events):
             received_events.append(events)
 
+        initial_time = timezone.now()
+
         # Create two bookings
         booking1 = TestBooking.objects.create(
             guest_name="Guest 1",
-            checkin_date=timezone.now() + timedelta(days=1),
-            checkout_date=timezone.now() + timedelta(days=3),
+            checkin_date=initial_time + timedelta(days=1),
+            checkout_date=initial_time + timedelta(days=3),
         )
         booking2 = TestBooking.objects.create(
             guest_name="Guest 2",
-            checkin_date=timezone.now() + timedelta(days=1),
-            checkout_date=timezone.now() + timedelta(days=3),
+            checkin_date=initial_time + timedelta(days=1),
+            checkout_date=initial_time + timedelta(days=3),
         )
 
         ct = ContentType.objects.get_for_model(TestBooking)
@@ -2458,20 +2465,21 @@ class DebouncedOnEventCallbackTest(TransactionTestCase):
             namespace="ns2",
         )
 
-        # Fire events
-        from ..events.callbacks import EventPhase
-        callback_registry.notify(event1, EventPhase.OCCURRED)
-        callback_registry.notify(event2, EventPhase.OCCURRED)
+        with freeze_time(initial_time) as frozen_time:
+            # Fire events
+            from ..events.callbacks import EventPhase
+            callback_registry.notify(event1, EventPhase.OCCURRED)
+            callback_registry.notify(event2, EventPhase.OCCURRED)
 
-        # Advance time and process
-        future_time = timezone.now() + timedelta(minutes=10)
-        self.executor.process_debounced_tasks(future_time)
+            # Advance time and process
+            frozen_time.tick(delta=timedelta(minutes=10))
+            self.executor.process_debounced_tasks(timezone.now())
 
-        # Should have 2 separate callback invocations (one per debounce key)
-        self.assertEqual(len(received_events), 2)
-        # Each invocation should have 1 event
-        self.assertEqual(len(received_events[0]), 1)
-        self.assertEqual(len(received_events[1]), 1)
+            # Should have 2 separate callback invocations (one per debounce key)
+            self.assertEqual(len(received_events), 2)
+            # Each invocation should have 1 event
+            self.assertEqual(len(received_events[0]), 1)
+            self.assertEqual(len(received_events[1]), 1)
 
     def test_non_debounced_callback_still_works(self):
         """Test that non-debounced callbacks still execute immediately"""

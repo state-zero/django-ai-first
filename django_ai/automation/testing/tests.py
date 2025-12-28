@@ -715,33 +715,27 @@ class TestTimeMachineDelayedTasks(TransactionTestCase):
     def test_delayed_task_not_executed_before_time_advance(self):
         """Delayed tasks should not execute until time advances past their delay."""
         from django_ai.automation.queues.sync_executor import SynchronousExecutor
+        from django_q.models import Schedule
+        from freezegun import freeze_time
 
-        # Use a fresh executor to test delayed task directly
         executor = SynchronousExecutor()
-        executed = []
 
-        # Define a simple task function we can track
-        def track_execution(*args):
-            executed.append(args)
+        initial_time = timezone.now()
 
-        with time_machine() as tm:
-            # Manually add a delayed task to the executor
-            run_at = timezone.now() + timedelta(minutes=30)
-            executor._delayed_tasks.append((run_at, "test_task", ("arg1",)))
+        with freeze_time(initial_time) as frozen_time:
+            # Queue a delayed task using the public API
+            executor.queue_task("poll_due_events", 24, delay=timedelta(minutes=30))
 
             # Task should be queued but not executed
-            self.assertEqual(len(executed), 0)
             self.assertEqual(len(executor._delayed_tasks), 1)
 
-            # Advance only 10 minutes - still shouldn't execute
+            # Process at current time - nothing should execute
             count = executor.process_delayed_tasks(timezone.now())
             self.assertEqual(count, 0)
             self.assertEqual(len(executor._delayed_tasks), 1)
 
-            # Advance past the delay - should be ready to execute
-            tm.advance(minutes=35)
-            # The task is now due, but we need to verify it's detected as due
-            self.assertEqual(len(executor._delayed_tasks), 1)
+            # Advance past the delay - task should be detected as due
+            frozen_time.tick(delta=timedelta(minutes=35))
             due_tasks = [t for t in executor._delayed_tasks if t[0] <= timezone.now()]
             self.assertEqual(len(due_tasks), 1)
 

@@ -304,51 +304,52 @@ class TestEndToEndIntegration(TransactionTestCase):
 
 @override_settings(SKIP_Q2_AUTOSCHEDULE=True)
 class TestDebounce(TransactionTestCase):
-    """Tests for the debounce mechanism."""
+    """Tests for the debounce mechanism using the DebouncedTask model."""
 
     def setUp(self):
+        from .models import DebouncedTask
         self.executor = SynchronousExecutor()
         engine.set_executor(self.executor)
+        # Clean up any leftover debounced tasks
+        DebouncedTask.objects.all().delete()
 
     def test_debounce_single_call_executes_after_delay(self):
         """A single debounced task executes after the delay."""
-        execution_log = []
+        from .models import DebouncedTask
+        from freezegun import freeze_time
 
-        # Manually track what gets executed
-        def mock_execute(task_name, args, events=None):
-            execution_log.append((task_name, args, events))
+        initial_time = timezone.now()
 
-        self.executor._execute_task = mock_execute
+        with freeze_time(initial_time) as frozen_time:
+            # Debounce a task
+            self.executor.debounce_task(
+                "test-key",
+                "poll_due_events",
+                24,
+                delay=timedelta(seconds=30),
+                event_id=1,
+            )
 
-        # Debounce a task
-        self.executor.debounce_task(
-            "test-key",
-            "poll_due_events",
-            24,
-            delay=timedelta(seconds=30),
-            event_id=1,
-        )
+            # Task should exist in database but not executed
+            self.assertTrue(DebouncedTask.objects.filter(debounce_key="test-key").exists())
+            task = DebouncedTask.objects.get(debounce_key="test-key")
+            self.assertEqual(task.task_name, "poll_due_events")
+            self.assertEqual(task.task_args, (24,))
 
-        # Task should not have executed yet
-        self.assertEqual(len(execution_log), 0)
+            # Process at current time - nothing due yet
+            self.executor.process_debounced_tasks(timezone.now())
+            self.assertTrue(DebouncedTask.objects.filter(debounce_key="test-key").exists())
 
-        # Process at current time - nothing due yet
-        self.executor.process_debounced_tasks(timezone.now())
-        self.assertEqual(len(execution_log), 0)
+            # Advance time past the delay
+            frozen_time.tick(delta=timedelta(seconds=31))
 
-        # Process after delay - now it should execute
-        self.executor.process_debounced_tasks(timezone.now() + timedelta(seconds=31))
-        self.assertEqual(len(execution_log), 1)
-        self.assertEqual(execution_log[0][0], "poll_due_events")
+            # Process after delay - task should be executed and removed from database
+            self.executor.process_debounced_tasks(timezone.now())
+            self.assertFalse(DebouncedTask.objects.filter(debounce_key="test-key").exists())
 
     def test_debounce_multiple_calls_accumulate_events(self):
         """Multiple debounced calls with same key accumulate events."""
-        execution_log = []
-
-        def mock_execute(task_name, args, events=None):
-            execution_log.append((task_name, args, events))
-
-        self.executor._execute_task = mock_execute
+        from .models import DebouncedTask
 
         # First call
         self.executor.debounce_task(
@@ -377,12 +378,14 @@ class TestDebounce(TransactionTestCase):
             event_id=3,
         )
 
-        # Check accumulated events
-        task_info = self.executor._debounced_tasks["test-key"]
-        self.assertEqual(task_info.event_ids, [1, 2, 3])
+        # Check accumulated events in database
+        task = DebouncedTask.objects.get(debounce_key="test-key")
+        self.assertEqual(task.event_ids, [1, 2, 3])
 
     def test_debounce_resets_scheduled_time(self):
         """Each debounce call resets the scheduled time."""
+        from .models import DebouncedTask
+
         # First call
         self.executor.debounce_task(
             "test-key",
@@ -392,7 +395,7 @@ class TestDebounce(TransactionTestCase):
             event_id=1,
         )
 
-        first_scheduled = self.executor._debounced_tasks["test-key"].scheduled_at
+        first_scheduled = DebouncedTask.objects.get(debounce_key="test-key").scheduled_at
 
         # Wait a bit (simulate time passing)
         import time
@@ -407,13 +410,15 @@ class TestDebounce(TransactionTestCase):
             event_id=2,
         )
 
-        second_scheduled = self.executor._debounced_tasks["test-key"].scheduled_at
+        second_scheduled = DebouncedTask.objects.get(debounce_key="test-key").scheduled_at
 
         # Second scheduled time should be later
         self.assertGreater(second_scheduled, first_scheduled)
 
     def test_debounce_different_keys_independent(self):
         """Different debounce keys are tracked independently."""
+        from .models import DebouncedTask
+
         self.executor.debounce_task(
             "key-1",
             "poll_due_events",
@@ -430,20 +435,22 @@ class TestDebounce(TransactionTestCase):
             event_id=2,
         )
 
-        self.assertEqual(len(self.executor._debounced_tasks), 2)
-        self.assertIn("key-1", self.executor._debounced_tasks)
-        self.assertIn("key-2", self.executor._debounced_tasks)
+        self.assertEqual(DebouncedTask.objects.count(), 2)
+        self.assertTrue(DebouncedTask.objects.filter(debounce_key="key-1").exists())
+        self.assertTrue(DebouncedTask.objects.filter(debounce_key="key-2").exists())
 
         # Check they have different task names
         self.assertEqual(
-            self.executor._debounced_tasks["key-1"].task_name, "poll_due_events"
+            DebouncedTask.objects.get(debounce_key="key-1").task_name, "poll_due_events"
         )
         self.assertEqual(
-            self.executor._debounced_tasks["key-2"].task_name, "cleanup_old_events"
+            DebouncedTask.objects.get(debounce_key="key-2").task_name, "cleanup_old_events"
         )
 
     def test_debounce_duplicate_event_ids_not_added(self):
         """Same event ID is not added multiple times."""
+        from .models import DebouncedTask
+
         self.executor.debounce_task(
             "test-key",
             "poll_due_events",
@@ -461,8 +468,8 @@ class TestDebounce(TransactionTestCase):
             event_id=1,
         )
 
-        task_info = self.executor._debounced_tasks["test-key"]
-        self.assertEqual(task_info.event_ids, [1])  # Not [1, 1]
+        task = DebouncedTask.objects.get(debounce_key="test-key")
+        self.assertEqual(task.event_ids, [1])  # Not [1, 1]
 
 
 @override_settings(SKIP_Q2_AUTOSCHEDULE=True)
