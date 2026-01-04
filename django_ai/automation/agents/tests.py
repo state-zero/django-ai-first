@@ -46,7 +46,7 @@ class DecoratorValidationTests(TestCase):
         """Test that agent decorator validates Context class"""
         with self.assertRaises(ValueError) as cm:
 
-            @agent("test_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+            @agent("test_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
             class BadAgent:
                 @classmethod
                 def create_context(cls, event):
@@ -58,7 +58,7 @@ class DecoratorValidationTests(TestCase):
         """Test that agent decorator validates create_context method"""
         with self.assertRaises(ValueError) as cm:
 
-            @agent("test_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+            @agent("test_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
             class BadAgent:
                 class Context(BaseModel):
                     pass
@@ -68,7 +68,7 @@ class DecoratorValidationTests(TestCase):
     def test_handler_decorator_stores_metadata(self):
         """Test that handler decorator stores correct metadata"""
 
-        def my_condition(event, ctx):
+        def my_condition(event, context):
             return True
 
         retry_policy = Retry(max_attempts=5)
@@ -79,7 +79,7 @@ class DecoratorValidationTests(TestCase):
             condition=my_condition,
             retry=retry_policy,
         )
-        def test_handler(self, ctx):
+        def test_handler(self):
             pass
 
         self.assertTrue(test_handler._is_handler)
@@ -91,7 +91,7 @@ class DecoratorValidationTests(TestCase):
     def test_agent_registers_globally(self):
         """Test that agent decorator registers agent globally"""
 
-        @agent("my_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("my_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class MyAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -106,7 +106,7 @@ class DecoratorValidationTests(TestCase):
     def test_agent_collects_handlers(self):
         """Test that agent decorator collects all handler methods"""
 
-        @agent("collector_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("collector_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class CollectorAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -116,15 +116,15 @@ class DecoratorValidationTests(TestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("move_in", offset=timedelta(minutes=-180))
-            def handler_one(self, ctx):
+            def handler_one(self):
                 pass
 
             @handler("move_in")
-            def handler_two(self, ctx):
+            def handler_two(self):
                 pass
 
             @handler("move_out")
-            def handler_three(self, ctx):
+            def handler_three(self):
                 pass
 
         handlers = _agent_handlers["collector_agent"]
@@ -165,7 +165,7 @@ class AgentIntegrationTests(TransactionTestCase):
     def test_agent_spawn_via_immediate_event(self):
         """Agent spawns when spawn_on event occurs."""
 
-        @agent("spawn_test_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("spawn_test_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class SpawnTestAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -196,7 +196,7 @@ class AgentIntegrationTests(TransactionTestCase):
     def test_singleton_prevents_duplicate_spawn(self):
         """singleton=True prevents duplicate agents for same match."""
 
-        @agent("singleton_agent", spawn_on="booking_created", match={"guest_id": "{{ ctx.guest_id }}"}, singleton=True)
+        @agent("singleton_agent", spawn_on="booking_created", match={"guest_id": "{{ context.guest_id }}"}, singleton=True)
         class SingletonAgent:
             class Context(BaseModel):
                 guest_id: int = 0
@@ -235,7 +235,7 @@ class AgentIntegrationTests(TransactionTestCase):
         """Handler executes when its event fires."""
         handler_log = []
 
-        @agent("handler_exec_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("handler_exec_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class HandlerExecAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -246,9 +246,9 @@ class AgentIntegrationTests(TransactionTestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("booking_confirmed")
-            def on_confirmed(self, ctx):
+            def on_confirmed(self):
                 handler_log.append("on_confirmed_called")
-                ctx.handled = True
+                self.context.handled = True
 
         with time_machine() as tm:
             # Create booking with confirmed status - spawns agent and triggers booking_confirmed
@@ -275,7 +275,7 @@ class AgentIntegrationTests(TransactionTestCase):
         """Handler with positive offset executes after the event's scheduled time."""
         handler_log = []
 
-        @agent("offset_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("offset_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class OffsetAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -285,7 +285,7 @@ class AgentIntegrationTests(TransactionTestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("move_in", offset=timedelta(minutes=60))  # 1 hour after checkin
-            def send_followup(self, ctx):
+            def send_followup(self):
                 handler_log.append("followup_sent")
 
         with time_machine() as tm:
@@ -320,7 +320,7 @@ class AgentIntegrationTests(TransactionTestCase):
         """Handler with negative offset executes before the event's scheduled time."""
         handler_log = []
 
-        @agent("pre_checkin_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("pre_checkin_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class PreCheckinAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -330,7 +330,7 @@ class AgentIntegrationTests(TransactionTestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("move_in", offset=timedelta(minutes=-180))  # 3 hours before checkin
-            def send_pre_checkin(self, ctx):
+            def send_pre_checkin(self):
                 handler_log.append("pre_checkin_sent")
 
         with time_machine() as tm:
@@ -356,7 +356,7 @@ class AgentIntegrationTests(TransactionTestCase):
         """Multiple handlers for same event with different offsets fire at correct times."""
         handler_log = []
 
-        @agent("multi_offset_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("multi_offset_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class MultiOffsetAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -366,15 +366,15 @@ class AgentIntegrationTests(TransactionTestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("move_in", offset=timedelta(minutes=-60))  # 1 hour before
-            def one_hour_before(self, ctx):
+            def one_hour_before(self):
                 handler_log.append("1h_before")
 
             @handler("move_in")  # At checkin
-            def at_checkin(self, ctx):
+            def at_checkin(self):
                 handler_log.append("at_checkin")
 
             @handler("move_in", offset=timedelta(minutes=60))  # 1 hour after
-            def one_hour_after(self, ctx):
+            def one_hour_after(self):
                 handler_log.append("1h_after")
 
         with time_machine() as tm:
@@ -407,10 +407,10 @@ class AgentIntegrationTests(TransactionTestCase):
         """condition=False prevents handler execution."""
         handler_log = []
 
-        def always_false(event, ctx):
+        def always_false(event, context):
             return False
 
-        @agent("condition_test_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("condition_test_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class ConditionTestAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -420,7 +420,7 @@ class AgentIntegrationTests(TransactionTestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("booking_confirmed", condition=always_false)
-            def conditional_handler(self, ctx):
+            def conditional_handler(self):
                 handler_log.append("should_not_run")
 
         with time_machine() as tm:
@@ -444,7 +444,7 @@ class AgentIntegrationTests(TransactionTestCase):
     def test_handler_updates_context(self):
         """Handler can update agent context."""
 
-        @agent("context_update_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("context_update_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class ContextUpdateAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -456,9 +456,9 @@ class AgentIntegrationTests(TransactionTestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("booking_confirmed")
-            def increment_and_log(self, ctx):
-                ctx.counter += 1
-                ctx.messages.append("confirmed")
+            def increment_and_log(self):
+                self.context.counter += 1
+                self.context.messages.append("confirmed")
 
         with time_machine() as tm:
             booking = Booking.objects.create(
@@ -480,7 +480,7 @@ class AgentIntegrationTests(TransactionTestCase):
         """Test a realistic reservation journey with multiple timed handlers."""
         journey_log = []
 
-        @agent("reservation_journey", spawn_on="booking_created", match={"id": "{{ ctx.reservation_id }}"})
+        @agent("reservation_journey", spawn_on="booking_created", match={"id": "{{ context.reservation_id }}"})
         class ReservationJourney:
             class Context(BaseModel):
                 reservation_id: int = 0
@@ -498,23 +498,23 @@ class AgentIntegrationTests(TransactionTestCase):
                 )
 
             @handler("booking_confirmed")
-            def send_confirmation(self, ctx):
-                journey_log.append(f"confirmation:{ctx.reservation_id}")
+            def send_confirmation(self):
+                journey_log.append(f"confirmation:{self.context.reservation_id}")
 
             @handler("move_in", offset=timedelta(minutes=-180))  # 3 hours before
-            def send_pre_checkin(self, ctx):
-                journey_log.append(f"pre_checkin:{ctx.reservation_id}")
-                ctx.pre_checkin_sent = True
+            def send_pre_checkin(self):
+                journey_log.append(f"pre_checkin:{self.context.reservation_id}")
+                self.context.pre_checkin_sent = True
 
             @handler("move_in")
-            def send_welcome(self, ctx):
-                journey_log.append(f"welcome:{ctx.reservation_id}")
-                ctx.welcome_sent = True
+            def send_welcome(self):
+                journey_log.append(f"welcome:{self.context.reservation_id}")
+                self.context.welcome_sent = True
 
             @handler("move_out")
-            def send_checkout(self, ctx):
-                journey_log.append(f"checkout:{ctx.reservation_id}")
-                ctx.checkout_sent = True
+            def send_checkout(self):
+                journey_log.append(f"checkout:{self.context.reservation_id}")
+                self.context.checkout_sent = True
 
         with time_machine() as tm:
             # Checkin is 5 hours from now, checkout 2 days later
@@ -675,7 +675,7 @@ class HandlerOnSpawnEventTests(TransactionTestCase):
         """
         handler_log = []
 
-        @agent("guest_journey", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("guest_journey", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class GuestJourneyAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -686,13 +686,13 @@ class HandlerOnSpawnEventTests(TransactionTestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("booking_created")  # Same event as spawn_on
-            def create_guest_access_code(self, ctx):
+            def create_guest_access_code(self):
                 """This handler should execute when agent spawns."""
                 handler_log.append("access_code_created")
-                ctx.access_code_set = True
+                self.context.access_code_set = True
 
             @handler("booking_confirmed")  # Different event
-            def send_confirmation(self, ctx):
+            def send_confirmation(self):
                 handler_log.append("confirmation_sent")
 
         with time_machine() as tm:
@@ -782,7 +782,7 @@ class EventConditionTests(TransactionTestCase):
         """
         handler_log = []
 
-        @agent("journey_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("journey_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class JourneyAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -792,17 +792,17 @@ class EventConditionTests(TransactionTestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("booking_created")
-            def on_created(self, ctx):
+            def on_created(self):
                 """This should execute - booking_created condition is always true."""
                 handler_log.append("on_created")
 
             @handler("booking_confirmed")
-            def on_confirmed(self, ctx):
+            def on_confirmed(self):
                 """This should NOT execute - status is 'pending', not 'confirmed'."""
                 handler_log.append("on_confirmed")
 
             @handler("guest_checked_in")
-            def on_checked_in(self, ctx):
+            def on_checked_in(self):
                 """This should NOT execute - status is 'pending', not 'checked_in'."""
                 handler_log.append("on_checked_in")
 
@@ -855,7 +855,7 @@ class EventConditionTests(TransactionTestCase):
         """
         handler_log = []
 
-        @agent("status_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("status_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class StatusAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -865,11 +865,11 @@ class EventConditionTests(TransactionTestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("booking_created")
-            def on_created(self, ctx):
+            def on_created(self):
                 handler_log.append("on_created")
 
             @handler("booking_confirmed")
-            def on_confirmed(self, ctx):
+            def on_confirmed(self):
                 handler_log.append("on_confirmed")
 
         with time_machine() as tm:
@@ -905,7 +905,7 @@ class EventConditionTests(TransactionTestCase):
         """
         handler_log = []
 
-        @agent("multi_event_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("multi_event_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class MultiEventAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -915,21 +915,21 @@ class EventConditionTests(TransactionTestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("booking_created")
-            def handle_created(self, ctx):
+            def handle_created(self):
                 handler_log.append("created")
 
             @handler("booking_confirmed")
-            def handle_confirmed(self, ctx):
+            def handle_confirmed(self):
                 """Condition: status == 'confirmed'"""
                 handler_log.append("confirmed")
 
             @handler("payment_received")
-            def handle_payment(self, ctx):
+            def handle_payment(self):
                 """Condition: payment_confirmed == True"""
                 handler_log.append("payment")
 
             @handler("guest_checked_in")
-            def handle_checkin(self, ctx):
+            def handle_checkin(self):
                 """Condition: status == 'checked_in'"""
                 handler_log.append("checked_in")
 
@@ -981,7 +981,7 @@ class HandlerEventParameterTests(TransactionTestCase):
         """Handler with event parameter receives the event object."""
         captured_events = []
 
-        @agent("event_param_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("event_param_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class EventParamAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -991,7 +991,7 @@ class HandlerEventParameterTests(TransactionTestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("booking_confirmed")
-            def on_confirmed(self, ctx, event):
+            def on_confirmed(self, event):
                 """Handler requests event parameter."""
                 captured_events.append({
                     "event_name": event.event_name,
@@ -1017,7 +1017,7 @@ class HandlerEventParameterTests(TransactionTestCase):
         """Handler without event parameter continues to work (backward compatible)."""
         handler_log = []
 
-        @agent("no_event_param_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("no_event_param_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class NoEventParamAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -1027,7 +1027,7 @@ class HandlerEventParameterTests(TransactionTestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("booking_confirmed")
-            def on_confirmed(self, ctx):
+            def on_confirmed(self):
                 """Handler does NOT request event parameter."""
                 handler_log.append("confirmed")
 
@@ -1046,7 +1046,7 @@ class HandlerEventParameterTests(TransactionTestCase):
         """Handler can access the entity that triggered the event."""
         entity_data = []
 
-        @agent("entity_access_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("entity_access_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class EntityAccessAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -1056,7 +1056,7 @@ class HandlerEventParameterTests(TransactionTestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("booking_confirmed")
-            def on_confirmed(self, ctx, event):
+            def on_confirmed(self, event):
                 # Access entity properties directly from event
                 booking = event.entity
                 entity_data.append({
@@ -1080,7 +1080,7 @@ class HandlerEventParameterTests(TransactionTestCase):
         """Agent can have both handler types - with and without event param."""
         handler_log = []
 
-        @agent("mixed_handlers_agent", spawn_on="booking_created", match={"id": "{{ ctx.booking_id }}"})
+        @agent("mixed_handlers_agent", spawn_on="booking_created", match={"id": "{{ context.booking_id }}"})
         class MixedHandlersAgent:
             class Context(BaseModel):
                 booking_id: int = 0
@@ -1090,12 +1090,12 @@ class HandlerEventParameterTests(TransactionTestCase):
                 return cls.Context(booking_id=event.entity.id)
 
             @handler("booking_created")
-            def on_created(self, ctx):
+            def on_created(self):
                 """No event parameter."""
                 handler_log.append("created_no_event")
 
             @handler("booking_confirmed")
-            def on_confirmed(self, ctx, event):
+            def on_confirmed(self, event):
                 """With event parameter."""
                 handler_log.append(f"confirmed_with_event:{event.event_name}")
 

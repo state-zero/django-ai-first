@@ -8,7 +8,6 @@ from django.utils import timezone
 from django.db import transaction
 
 from ..workflows.core import (
-    get_context,
     engine,
     Retry,
 )
@@ -23,10 +22,10 @@ def _render_template(template_str: str, context_dict: dict) -> str:
     """
     Render a Django template string against context.
 
-    Context is available as 'ctx' in templates, e.g. "{{ ctx.booking_id }}".
+    Context is available as 'context' in templates, e.g. "{{ context.booking_id }}".
 
     Args:
-        template_str: Template like "{{ ctx.reservation_id }}" or "{{ ctx.priority|add:1 }}"
+        template_str: Template like "{{ context.reservation_id }}" or "{{ context.priority|add:1 }}"
         context_dict: The agent's context dict
 
     Returns:
@@ -34,7 +33,7 @@ def _render_template(template_str: str, context_dict: dict) -> str:
     """
     from django.template import Template, Context
     template = Template(template_str)
-    return template.render(Context({"ctx": context_dict})).strip()
+    return template.render(Context({"context": context_dict})).strip()
 
 
 # Type for match dict values - template strings
@@ -183,11 +182,11 @@ def handler(
         event_name: Event that triggers this handler
         offset: Offset from event time. Accepts timedelta or relativedelta.
                Negative = before, positive = after.
-        condition: Optional callable(event, ctx) -> bool to conditionally execute handler
+        condition: Optional callable(event, context) -> bool to conditionally execute handler
         retry: Retry policy for this handler
         ignores_claims: If True, handler runs regardless of event claims
-        match: Dict mapping entity fields to context fields for routing.
-               Format: {entity_field: ctx.context_field}
+        match: Dict mapping entity fields to context template values for routing.
+               Format: {entity_field: "{{ context.field }}"}
                Supports Django __ syntax for nested fields.
         namespace: Event namespace to filter on. Use "*" (default) to match all.
         debounce: If set, debounce handler executions by this duration.
@@ -198,25 +197,23 @@ def handler(
                      If not set, defaults to agent_run_id + handler_name.
 
     Example:
-        from django_ai.automation.agents import handler, ctx
-
         @handler("move_in", offset=timedelta(days=-3))  # 3 days before
-        def send_pre_checkin_reminder(self, context):
-            send_message(context.guest_name, "Your stay is coming up!")
-            context.reminder_sent = True
+        def send_pre_checkin_reminder(self):
+            send_message(self.context.guest_name, "Your stay is coming up!")
+            self.context.reminder_sent = True
 
-        @handler("message_received", match={"sender_id": ctx.guest_id})
-        def handle_message(self, context):
-            # Routes messages where entity.sender_id == context.guest_id
+        @handler("message_received", match={"sender_id": "{{ context.guest_id }}"})
+        def handle_message(self):
+            # Routes messages where entity.sender_id == self.context.guest_id
             pass
 
         @handler("audit_event", ignores_claims=True)
-        def audit_all(self, context):
+        def audit_all(self):
             # Always runs, even when another flow claims this event
             pass
 
         @handler("booking_updated", debounce=timedelta(seconds=30), debounce_key="{entity.id}")
-        def handle_updates(self, context, events):
+        def handle_updates(self, events):
             # Receives list of all events within 30s window
             for event in events:
                 process(event)
@@ -231,7 +228,7 @@ def handler(
             import inspect
             sig = inspect.signature(func)
             params = list(sig.parameters.keys())
-            # Should have self, context, events
+            # Should have self and events
             if 'events' not in params:
                 raise ValueError(
                     f"Handler '{func.__name__}' with debounce must have 'events' parameter "
@@ -266,7 +263,7 @@ def agent(
         name: Unique agent name (e.g., "reservation_journey")
         spawn_on: Event that creates a new agent instance (required)
         match: Dict for finding existing agent instances.
-               Format: {entity_field: ctx.context_field}
+               Format: {entity_field: "{{ context.field }}"}
                Supports Django __ syntax for nested fields.
                Used for singleton checks and event routing.
         singleton: If True (default), only one agent per context match.
@@ -280,12 +277,12 @@ def agent(
         - @handler methods: Event handlers with optional offsets and conditions
 
     Example:
-        from django_ai.automation.agents import agent, handler, ctx
+        from django_ai.automation.agents import agent, handler
 
         @agent(
             "reservation_journey",
             spawn_on="reservation_created",
-            match={"id": ctx.reservation_id}
+            match={"id": "{{ context.reservation_id }}"}
         )
         class ReservationJourney:
             class Context(BaseModel):
@@ -302,12 +299,12 @@ def agent(
                 )
 
             @handler("move_in")
-            def send_reminder(self, context):
-                send_message(context.guest_name, "Check-in soon!")
-                context.reminder_sent = True
+            def send_reminder(self):
+                send_message(self.context.guest_name, "Check-in soon!")
+                self.context.reminder_sent = True
 
-            @handler("message_received", match={"sender_id": ctx.guest_id})
-            def handle_message(self, context):
+            @handler("message_received", match={"sender_id": "{{ context.guest_id }}"})
+            def handle_message(self):
                 # Different entity type - need explicit match to find agent
                 pass
     """
@@ -687,12 +684,12 @@ class AgentEngine:
         )
 
         try:
-            context = agent_class.Context.model_validate(agent_run.context)
             agent_instance = agent_class()
+            agent_instance.context = agent_class.Context.model_validate(agent_run.context)
             handler_method = getattr(agent_instance, handler_name)
-            handler_method(context, events=events)
+            handler_method(events=events)
 
-            agent_run.context = context.model_dump()
+            agent_run.context = agent_instance.context.model_dump()
             agent_run.save()
             execution.status = HandlerStatus.COMPLETED
             execution.completed_at = timezone.now()
@@ -743,6 +740,7 @@ class AgentEngine:
                 # Get agent class and handler method
                 agent_class = _agents[agent_run.agent_name]
                 agent_instance = agent_class()
+                agent_instance.context = agent_class.Context.model_validate(agent_run.context)
                 handler_method = getattr(agent_instance, execution.handler_name)
                 handler_info = None
 
@@ -751,9 +749,6 @@ class AgentEngine:
                     if h.method_name == execution.handler_name:
                         handler_info = h
                         break
-
-                # Load context
-                context = agent_class.Context.model_validate(agent_run.context)
 
                 # Check if handler wants event parameter
                 sig = inspect.signature(handler_method)
@@ -768,7 +763,7 @@ class AgentEngine:
 
                 # Check condition if specified
                 if handler_info and handler_info.condition:
-                    if not handler_info.condition(event, context):
+                    if not handler_info.condition(event, agent_instance.context):
                         execution.status = HandlerStatus.SKIPPED
                         execution.completed_at = timezone.now()
                         execution.error = "Condition not met"
@@ -777,16 +772,15 @@ class AgentEngine:
 
                 # Execute handler within claims context
                 from ..events.claims import _context as claims_context
-                print(f"[AGENT DEBUG] BEFORE handler {execution.handler_name}")
                 try:
                     with claims_context("agent", agent_class, agent_run.id):
                         if handler_wants_event:
-                            handler_method(context, event)
+                            handler_method(event)
                         else:
-                            handler_method(context)
+                            handler_method()
 
                     # Save updated context
-                    agent_run.context = context.model_dump()
+                    agent_run.context = agent_instance.context.model_dump()
                     agent_run.updated_at = timezone.now()
                     agent_run.save()
 

@@ -11,7 +11,7 @@ from ..core import (
     complete,
     fail,
     engine,
-    get_context,
+    
     run_subflow,
     SubflowResult,
 )
@@ -56,8 +56,8 @@ class SubflowTestCase(TestCase):
 
             @step(start=True)
             def process(self):
-                ctx = get_context()
-                ctx.output_value = ctx.input_value * 2
+                
+                self.context.output_value = self.context.input_value * 2
                 return complete()
 
         @workflow("main_workflow")
@@ -69,17 +69,17 @@ class SubflowTestCase(TestCase):
 
             @step(start=True)
             def start(self):
-                ctx = get_context()
+                
                 return run_subflow(
                     SubWorkflow,
                     on_complete=self.after_subflow,
-                    input_value=ctx.initial
+                    input_value=self.context.initial
                 )
 
             @step()
             def after_subflow(self, subflow_result: SubflowResult):
-                ctx = get_context()
-                ctx.final = subflow_result.context.output_value
+                
+                self.context.final = subflow_result.context.output_value
                 return complete()
 
         # Start main workflow
@@ -150,9 +150,9 @@ class SubflowTestCase(TestCase):
 
             @step()
             def handle_result(self, subflow_result: SubflowResult):
-                ctx = get_context()
+                
                 if subflow_result.status == WorkflowStatus.FAILED:
-                    ctx.handled = True
+                    self.context.handled = True
                 return complete()
 
         main_run = engine.start("main_with_failure")
@@ -187,8 +187,8 @@ class SubflowTestCase(TestCase):
 
             @step(start=True)
             def process(self):
-                ctx = get_context()
-                ctx.value = 42
+                
+                self.context.value = 42
                 return complete()
 
         @workflow("middle")
@@ -206,8 +206,8 @@ class SubflowTestCase(TestCase):
 
             @step()
             def process_inner(self, subflow_result: SubflowResult):
-                ctx = get_context()
-                ctx.final_value = subflow_result.context.value * 2
+                
+                self.context.final_value = subflow_result.context.value * 2
                 return complete()
 
         @workflow("outer")
@@ -225,8 +225,8 @@ class SubflowTestCase(TestCase):
 
             @step()
             def finish(self, subflow_result: SubflowResult):
-                ctx = get_context()
-                ctx.total = subflow_result.context.final_value
+                
+                self.context.total = subflow_result.context.final_value
                 return complete()
 
         # Start outer workflow
@@ -279,8 +279,8 @@ class SubflowTestCase(TestCase):
 
             @step(start=True)
             def process(self):
-                ctx = get_context()
-                ctx.result = ctx.value * 3
+                
+                self.context.result = self.context.value * 3
                 return complete()
 
         @workflow("parent_workflow")
@@ -293,19 +293,19 @@ class SubflowTestCase(TestCase):
 
             @step(start=True)
             def start(self):
-                ctx = get_context()
+                
                 return run_subflow(
                     ChildWorkflow,
                     on_complete=self.handle_result,
                     on_create=self.setup_child,
-                    value=ctx.input_val
+                    value=self.context.input_val
                 )
 
             @step()
             def setup_child(self, child_run: WorkflowRun, parent_run: WorkflowRun):
                 """Called synchronously when child is created"""
-                ctx = get_context()
-                ctx.created_child_id = child_run.id
+                
+                self.context.created_child_id = child_run.id
                 callback_tracker.append({
                     'child_run_id': child_run.id,
                     'child_status': child_run.status,
@@ -314,8 +314,8 @@ class SubflowTestCase(TestCase):
 
             @step()
             def handle_result(self, subflow_result: SubflowResult):
-                ctx = get_context()
-                ctx.final_result = subflow_result.context.result
+                
+                self.context.final_result = subflow_result.context.result
                 return complete()
 
         # Start parent workflow
@@ -381,16 +381,16 @@ class TestSubflowsWithTimeMachine(TestCase):
 
             @step(start=True)
             def start_child(self):
-                ctx = get_context()
-                if ctx.slept:
+                
+                if self.context.slept:
                     return goto(self.finish_child)
-                ctx.slept = True
+                self.context.slept = True
                 return sleep(timedelta(hours=1))
 
             @step()
             def finish_child(self):
-                ctx = get_context()
-                ctx.processed = True
+                
+                self.context.processed = True
                 return complete()
 
         @workflow("parent_with_sleeping_child")
@@ -408,9 +408,9 @@ class TestSubflowsWithTimeMachine(TestCase):
 
             @step()
             def after_child(self, subflow_result: SubflowResult):
-                ctx = get_context()
+                
                 if subflow_result.context.processed:
-                    ctx.result = "child processed successfully"
+                    self.context.result = "child processed successfully"
                 return complete()
 
         with time_machine() as tm:
@@ -451,8 +451,8 @@ class TestSubflowsWithTimeMachine(TestCase):
 
             @step(start=True)
             def process(self):
-                ctx = get_context()
-                ctx.value = 100
+                
+                self.context.value = 100
                 return complete()
 
         @workflow("tm_middle")
@@ -467,8 +467,8 @@ class TestSubflowsWithTimeMachine(TestCase):
 
             @step()
             def after_inner(self, subflow_result: SubflowResult):
-                ctx = get_context()
-                ctx.doubled = subflow_result.context.value * 2
+                
+                self.context.doubled = subflow_result.context.value * 2
                 return complete()
 
         @workflow("tm_outer")
@@ -483,8 +483,8 @@ class TestSubflowsWithTimeMachine(TestCase):
 
             @step()
             def finish(self, subflow_result: SubflowResult):
-                ctx = get_context()
-                ctx.final = subflow_result.context.doubled + 1
+                
+                self.context.final = subflow_result.context.doubled + 1
                 return complete()
 
         with time_machine() as tm:

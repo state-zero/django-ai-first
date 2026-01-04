@@ -9,7 +9,7 @@ from ..core import (
     goto,
     complete,
     engine,
-    get_context,
+    
     wait_for_event,
 )
 from ..models import WorkflowRun, WorkflowStatus
@@ -40,11 +40,11 @@ class TestDisplayMetadata(TestCase):
 
             @step(start=True)
             def start_step(self):
-                ctx = get_context()
-                ctx.user_name = "John"
+                
+                self.context.user_name = "John"
                 return complete(
                     display_title="Welcome Complete!",
-                    display_subtitle=f"User {ctx.user_name} has been onboarded successfully"
+                    display_subtitle=f"User {self.context.user_name} has been onboarded successfully"
                 )
 
         run = engine.start("completion_display_test")
@@ -203,8 +203,8 @@ class TestDisplayMetadata(TestCase):
             )
             @step(start=True)
             def collect_info(self, property_name: str, property_type: str, email: str):
-                ctx = get_context()
-                ctx.property_name = property_name
+                
+                self.context.property_name = property_name
                 return complete()
 
         run = engine.start("step_display_test")
@@ -383,12 +383,12 @@ class TestDisplayMetadata(TestCase):
 
             @step(start=True)
             def process_items(self):
-                ctx = get_context()
-                ctx.user_name = "Alice"
-                ctx.items_processed = 42
+                
+                self.context.user_name = "Alice"
+                self.context.items_processed = 42
                 return complete(
-                    display_title=f"Processing Complete, {ctx.user_name}!",
-                    display_subtitle=f"Successfully processed {ctx.items_processed} items"
+                    display_title=f"Processing Complete, {self.context.user_name}!",
+                    display_subtitle=f"Successfully processed {self.context.items_processed} items"
                 )
 
         run = engine.start("dynamic_completion_test")
@@ -492,17 +492,14 @@ class TestDisplayMetadata(TestCase):
         self.assertEqual(action_info['display'].display_title, "Manual Input Required")
 
         # Simulate action completion to move to wait step
-        from ..core import _workflows, WorkflowContextManager, _current_context
+        from ..core import _workflows, safe_model_dump
         workflow_cls = _workflows["step_type_display_test"]
-        ctx_manager = WorkflowContextManager(run.id, workflow_cls.Context)
-        token = _current_context.set(ctx_manager)
-        try:
-            workflow_instance = workflow_cls()
-            result = workflow_instance.action_step(data="test")
-            ctx_manager.commit_changes()
-            engine._handle_result(run, result)
-        finally:
-            _current_context.reset(token)
+        workflow_instance = workflow_cls()
+        workflow_instance.context = workflow_cls.Context.model_validate(run.data)
+        result = workflow_instance.action_step(data="test")
+        run.data = safe_model_dump(workflow_instance.context)
+        run.save()
+        engine._handle_result(run, result)
 
         run.refresh_from_db()
         display = run.current_step_display

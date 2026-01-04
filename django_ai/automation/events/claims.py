@@ -10,26 +10,26 @@ Usage in handlers:
     from django_ai.automation.events import claims
 
     @handler("ticket_created")
-    def on_spawn(self, ctx):
+    def on_spawn(self):
         # Claim events matching this filter
-        claims.hold("message_received", match={"guest_id": ctx.guest_id})
+        claims.hold("message_received", match={"guest_id": self.context.guest_id})
 
         # With custom expiry
-        claims.hold("message_received", match={"guest_id": ctx.guest_id},
+        claims.hold("message_received", match={"guest_id": self.context.guest_id},
                     expires_in=timedelta(hours=2))
 
         # With event count limit
-        claims.hold("message_received", match={"guest_id": ctx.guest_id},
+        claims.hold("message_received", match={"guest_id": self.context.guest_id},
                     expires_after_events=5)
 
     @handler("ticket_resolved")
-    def cleanup(self, ctx):
-        claims.release("message_received", match={"guest_id": ctx.guest_id})
+    def cleanup(self):
+        claims.release("message_received", match={"guest_id": self.context.guest_id})
 
 For handlers that should always run regardless of claims:
 
     @handler("message_received", ignores_claims=True)
-    def audit_all_messages(self, ctx):
+    def audit_all_messages(self):
         pass
 """
 from __future__ import annotations

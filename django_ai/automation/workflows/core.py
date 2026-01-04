@@ -9,7 +9,6 @@ from dateutil.relativedelta import relativedelta
 T = TypeVar("T", bound=BaseModel)
 from dataclasses import dataclass
 from pydantic import BaseModel
-from contextvars import ContextVar
 from django.db import transaction
 from django.db.models import Q
 from .models import WorkflowRun, WorkflowStatus, StepExecution, StepType
@@ -165,12 +164,11 @@ def run_subflow(workflow_class: type, on_complete: Callable, on_create: Optional
     Example:
         @step()
         def my_step(self):
-            ctx = get_context()
             return run_subflow(
                 SubWorkflow,
                 on_complete=self.handle_result,
                 on_create=self.setup_subflow,
-                input_data=ctx.some_value
+                input_data=self.context.some_value
             )
 
         @step()
@@ -181,13 +179,12 @@ def run_subflow(workflow_class: type, on_complete: Callable, on_create: Optional
 
         @step()
         def handle_result(self, subflow_result: SubflowResult):
-            ctx = get_context()
             # Access the child workflow's result
             if subflow_result.status == WorkflowStatus.COMPLETED:
-                ctx.output = subflow_result.context.output_value
+                self.context.output = subflow_result.context.output_value
             else:
                 # Handle failure
-                ctx.error = subflow_result.error
+                self.context.error = subflow_result.error
             return complete()
     """
     on_complete_name = on_complete.__name__ if callable(on_complete) else str(on_complete)
@@ -207,55 +204,6 @@ class Retry:
     base_delay: timedelta = timedelta(seconds=1)
     max_delay: timedelta = timedelta(minutes=5)
     backoff_factor: float = 2.0
-
-
-# Context manager that handles persistence behind the scenes
-class WorkflowContextManager:
-    def __init__(self, run_id: int, context_class: type):
-        self.run_id = run_id
-        self.context_class = context_class
-        self._run = None
-        self._context = None
-        self._original_data = None
-
-    def get_context(self):
-        """Return the actual Pydantic context model"""
-        if self._context is None:
-            if not self._run:
-                self._run = WorkflowRun.objects.get(id=self.run_id)
-            self._context = self.context_class.model_validate(self._run.data)
-            self._original_data = dict(self._run.data)
-        return self._context
-
-    def commit_changes(self):
-        """Save changes back to database using safe JSON serialization"""
-        if self._context is not None and self._run:
-            self._run.data = safe_model_dump(self._context)
-            self._run.save()
-
-    def rollback_changes(self):
-        """Rollback any uncommitted changes"""
-        if self._original_data is not None:
-            self._context = None
-
-
-# Thread-safe context storage
-_current_context: ContextVar[Optional[WorkflowContextManager]] = ContextVar(
-    "workflow_context", default=None
-)
-
-
-def get_context() -> BaseModel:
-    """Get the current workflow context - returns the actual Pydantic model
-
-    For better type hints, use: ctx = get_context()  # type: MyContextClass
-    """
-    ctx_manager = _current_context.get()
-    if ctx_manager is None:
-        raise RuntimeError(
-            "No workflow context available - are you running inside a workflow step?"
-        )
-    return ctx_manager.get_context()
 
 
 # Workflow registration
@@ -495,11 +443,10 @@ def on_fail(func):
                     .values_list('step_name', flat=True)
                 )
 
-                ctx = get_context()
-                if 'charge_payment' in completed and ctx.charge_id:
-                    refund(ctx.charge_id)
-                if 'reserve_inventory' in completed and ctx.reservation_id:
-                    release_inventory(ctx.reservation_id)
+                if 'charge_payment' in completed and self.context.charge_id:
+                    refund(self.context.charge_id)
+                if 'reserve_inventory' in completed and self.context.reservation_id:
+                    release_inventory(self.context.reservation_id)
     """
     func._is_on_fail_handler = True
     return func
@@ -744,9 +691,6 @@ class WorkflowEngine:
         """
         Execute a single workflow step atomically and safely, preventing race conditions.
         """
-        ctx_manager = None
-        token = None
-
         try:
             # This atomic block ensures all database operations within are "all or nothing."
             # If any error occurs, the entire transaction is rolled back automatically.
@@ -761,10 +705,10 @@ class WorkflowEngine:
 
                 # --- Set up and execute the step ---
                 workflow_cls = _workflows[run.name]
-                ctx_manager = WorkflowContextManager(run_id, workflow_cls.Context)
-                token = _current_context.set(ctx_manager)
-
                 workflow_instance = workflow_cls()
+
+                # Hydrate context and set on instance
+                workflow_instance.context = workflow_cls.Context.model_validate(run.data)
 
                 if not hasattr(workflow_instance, step_name):
                     raise ValueError(
@@ -803,28 +747,19 @@ class WorkflowEngine:
                         f"Step must return a StepResult, got {type(result)}"
                     )
 
-                # Both the context data and the run's new status are saved here.
-                # If either fails, the whole transaction rolls back.
-                ctx_manager.commit_changes()
+                # Persist context changes back to DB
+                run.data = safe_model_dump(workflow_instance.context)
+                run.save()
+
                 self._handle_result(run, result)
 
         except WorkflowRun.DoesNotExist:
             # The run was deleted before we could process it. Nothing to do.
             return
         except Exception as e:
-            # This block catches any exception from the transaction, including
-            # database errors or errors from the step logic itself.
-            if ctx_manager:
-                ctx_manager.rollback_changes()  # Clear any in-memory changes.
-
             # The _handle_error method will run in its own, new transaction
             # to mark the workflow as failed.
             self._handle_error(run_id, step_name, e)
-        finally:
-            # This guarantees the thread-safe context is always reset,
-            # preventing state from leaking between workflow runs.
-            if token:
-                _current_context.reset(token)
 
     def _call_on_fail_handler(self, run: WorkflowRun):
         """
@@ -841,12 +776,10 @@ class WorkflowEngine:
         if not on_fail_handler_name:
             return
 
-        # Set up context so get_context() works inside the handler
-        ctx_manager = WorkflowContextManager(run.id, workflow_cls.Context)
-        token = _current_context.set(ctx_manager)
-
         try:
             workflow_instance = workflow_cls()
+            workflow_instance.context = workflow_cls.Context.model_validate(run.data)
+
             on_fail_method = getattr(workflow_instance, on_fail_handler_name)
 
             # Execute within claims context
@@ -854,16 +787,15 @@ class WorkflowEngine:
             with claims_context("workflow", workflow_cls, run.id):
                 on_fail_method(run)
 
-            # Commit any context changes made by the handler
-            ctx_manager.commit_changes()
+            # Persist context changes
+            run.data = safe_model_dump(workflow_instance.context)
+            run.save()
         except Exception as e:
             # Log but don't fail - the workflow is already failing
             logger.error(
                 f"Error in @on_fail handler {on_fail_handler_name} for workflow {run.name}: {e}",
                 exc_info=True,
             )
-        finally:
-            _current_context.reset(token)
 
     def _handle_result(self, run: WorkflowRun, result: StepResult):
         """Handle step execution results"""
@@ -955,22 +887,16 @@ class WorkflowEngine:
 
             # Call on_create callback if provided
             if result.on_create:
-                # Set up context manager for the parent run so callback can modify context
-                ctx_manager = WorkflowContextManager(run.id, workflow_cls.Context)
-                token = _current_context.set(ctx_manager)
+                workflow_instance = workflow_cls()
+                workflow_instance.context = workflow_cls.Context.model_validate(run.data)
 
-                try:
-                    workflow_instance = workflow_cls()
-                    on_create_method = getattr(workflow_instance, result.on_create)
-                    on_create_method(child_run, run)
+                on_create_method = getattr(workflow_instance, result.on_create)
+                on_create_method(child_run, run)
 
-                    # Commit context changes made by the callback
-                    ctx_manager.commit_changes()
-                    # Reload run to get updated data
-                    run.refresh_from_db()
-                finally:
-                    # Always reset the context
-                    _current_context.reset(token)
+                # Persist context changes made by the callback
+                run.data = safe_model_dump(workflow_instance.context)
+                run.save()
+                run.refresh_from_db()
 
             # Update parent context to store child run ID
             parent_context = workflow_cls.Context.model_validate(run.data)

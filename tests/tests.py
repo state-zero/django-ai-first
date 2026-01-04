@@ -16,7 +16,6 @@ from django_ai.automation.workflows.core import (
     workflow,
     event_workflow,
     step,
-    get_context,
     goto,
     complete,
     engine,
@@ -60,19 +59,19 @@ class ProductionScenarioTests(TestCase):
 
             @step(start=True)
             def step_one(self):
-                ctx = get_context()
+                
                 start_time = time.time()
-                ctx.step_count += 1
+                self.context.step_count += 1
                 # Simulate some processing time
                 time.sleep(0.01)
-                ctx.processing_time = time.time() - start_time
+                self.context.processing_time = time.time() - start_time
                 return goto(self.step_two)
 
             @step()
             def step_two(self):
-                ctx = get_context()
-                ctx.step_count += 1
-                return complete(final_count=ctx.step_count)
+                
+                self.context.step_count += 1
+                return complete(final_count=self.context.step_count)
 
         # Start multiple workflows
         workflow_runs = []
@@ -134,10 +133,10 @@ class ProductionScenarioTests(TestCase):
 
             @step(start=True)
             def start_step(self):
-                ctx = get_context()
-                ctx.step_reached = "start_step"
+                
+                self.context.step_reached = "start_step"
 
-                if ctx.should_cause_db_error:
+                if self.context.should_cause_db_error:
                     # Cause a validation error instead of foreign key error
                     raise ValueError("Simulated database validation error")
 
@@ -145,8 +144,8 @@ class ProductionScenarioTests(TestCase):
 
             @step()
             def end_step(self):
-                ctx = get_context()
-                ctx.step_reached = "end_step"
+                
+                self.context.step_reached = "end_step"
                 return complete()
 
         # Test successful case
@@ -182,8 +181,8 @@ class ProductionScenarioTests(TestCase):
 
             @step(start=True)
             def process_checkin(self):
-                ctx = get_context()
-                callback_calls.append(f"immediate_checkin_{ctx.booking_id}")
+                
+                callback_calls.append(f"immediate_checkin_{self.context.booking_id}")
                 return complete()
 
         @event_workflow("checkin_due", offset=timedelta(minutes=60))  # 1 hour after
@@ -200,8 +199,8 @@ class ProductionScenarioTests(TestCase):
 
             @step(start=True)
             def process_delayed_checkin(self):
-                ctx = get_context()
-                callback_calls.append(f"delayed_checkin_{ctx.booking_id}")
+                
+                callback_calls.append(f"delayed_checkin_{self.context.booking_id}")
                 return complete()
 
         # Create booking with checkin in the past (should trigger immediately)
@@ -269,21 +268,21 @@ class ProductionScenarioTests(TestCase):
             @step()
             def wait_for_signal_a(self):
                 # This step runs if signal_a is received
-                ctx = get_context()
-                ctx.signals_received.append("signal_a")
+                
+                self.context.signals_received.append("signal_a")
                 return goto(self.wait_for_signal_b)
             
             @step()
             def timeout_step(self):
-                ctx = get_context()
-                ctx.timeouts_hit += 1
+                
+                self.context.timeouts_hit += 1
                 return goto(self.wait_for_signal_b)
 
             @wait_for_event("test_signal_b")
             @step()
             def wait_for_signal_b(self):
-                ctx = get_context()
-                ctx.signals_received.append("signal_b")
+                
+                self.context.signals_received.append("signal_b")
                 return complete()
 
         workflow_run = engine.start("signal_test_workflow", workflow_id="test_123")
@@ -367,8 +366,8 @@ class ProductionScenarioTests(TestCase):
             
             @step()
             def cleanup_step(self):
-                ctx = get_context()
-                ctx.cleanup_performed = True
+                
+                self.context.cleanup_performed = True
                 return complete()
             
         workflow_run = engine.start("cleanup_test_workflow", workflow_id="cleanup_test")
@@ -425,15 +424,15 @@ class ProductionScenarioTests(TestCase):
 
             @step(start=True)
             def accumulate_data(self):
-                ctx = get_context()
+                
                 # Add some data each step
-                ctx.large_data.extend([f"item_{i}" for i in range(100)])
-                ctx.counter += 1
+                self.context.large_data.extend([f"item_{i}" for i in range(100)])
+                self.context.counter += 1
 
-                if ctx.counter < 5:
+                if self.context.counter < 5:
                     return goto(self.accumulate_data)
                 else:
-                    return complete(total_items=len(ctx.large_data))
+                    return complete(total_items=len(self.context.large_data))
 
         # Start workflow
         workflow_run = engine.start("large_context_workflow")
@@ -581,9 +580,9 @@ class StressTestWorkflows(TestCase):
 
             @step(start=True)
             def process(self):
-                ctx = get_context()
-                ctx.completed = True
-                return complete(workflow_num_result=ctx.workflow_num)
+                
+                self.context.completed = True
+                return complete(workflow_num_result=self.context.workflow_num)
 
         # Run many workflows
         num_workflows = 50
@@ -616,13 +615,13 @@ class StressTestWorkflows(TestCase):
 
             @step(start=True)
             def deep_step(self):
-                ctx = get_context()
-                ctx.current_depth += 1
+                
+                self.context.current_depth += 1
 
-                if ctx.current_depth < ctx.max_depth:
+                if self.context.current_depth < self.context.max_depth:
                     return goto(self.deep_step)  # Recursive call
                 else:
-                    return complete(final_depth=ctx.current_depth)
+                    return complete(final_depth=self.context.current_depth)
 
         # Test deep workflow
         run = engine.start("deep_workflow", max_depth=20)
@@ -677,8 +676,8 @@ class NamespaceIntegrationTests(TestCase):
 
             @step(start=True)
             def process(self):
-                ctx = get_context()
-                workflow_executions.append(f"default_{ctx.booking_id}")
+                
+                workflow_executions.append(f"default_{self.context.booking_id}")
                 return complete()
 
         # Create bookings - this will auto-create events

@@ -3,7 +3,7 @@ Simple test workflow for development
 """
 from pydantic import BaseModel
 from rest_framework import serializers
-from django_ai.automation.workflows.core import workflow, step, get_context, goto, complete
+from django_ai.automation.workflows.core import workflow, step,  goto, complete
 from django_ai.automation.workflows.statezero_action import statezero_action
 from statezero.core.classes import DisplayMetadata, FieldGroup
 
@@ -64,35 +64,35 @@ class UserOnboardingWorkflow:
     @step()
     def collect_user_info(self, name: str, email: str, favorite_color: str):
         """Collect user information"""
-        ctx = get_context()
-        ctx.name = name
-        ctx.email = email
-        ctx.favorite_color = favorite_color
+        
+        self.context.name = name
+        self.context.email = email
+        self.context.favorite_color = favorite_color
         return goto(self.create_account, progress=0.5)
     
     @step()
     def create_account(self):
         """Automated step: create account"""
-        ctx = get_context()
+        
         # Simulate account creation
-        ctx.account_id = f"ACC-{hash(ctx.email) % 100000}"
+        self.context.account_id = f"ACC-{hash(self.context.email) % 100000}"
         return goto(self.setup_preferences, progress=0.75)
     
     @step()
     def setup_preferences(self):
         """Automated step: set up user preferences"""
-        ctx = get_context()
+        
         # Simulate preference setup
-        ctx.setup_complete = True
+        self.context.setup_complete = True
         return goto(self.finalize, progress=0.9)
     
     @step()
     def finalize(self):
         """Complete the workflow"""
-        ctx = get_context()
+        
         return complete(
-            display_title=f"Welcome aboard, {ctx.name}! 🎉",
-            display_subtitle=f"Your account {ctx.account_id} is ready. We've set your theme to {ctx.favorite_color}."
+            display_title=f"Welcome aboard, {self.context.name}! 🎉",
+            display_subtitle=f"Your account {self.context.account_id} is ready. We've set your theme to {self.context.favorite_color}."
         )
 
 

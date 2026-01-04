@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from django_ai.automation.workflows.core import (
     workflow,
     step,
-    get_context,
+    
     goto,
     complete,
     engine,
@@ -63,10 +63,10 @@ class AsActionStateZeroTest(TestCase):
             @step()
             def await_review(self, reviewer_notes: str, priority: str):
                 """Step callable as StateZero action"""
-                ctx = get_context()
-                ctx.reviewer_notes = reviewer_notes
-                ctx.priority = priority
-                ctx.status = "reviewed"
+                
+                self.context.reviewer_notes = reviewer_notes
+                self.context.priority = priority
+                self.context.status = "reviewed"
                 return goto(self.complete_process)
 
             @step()
@@ -117,6 +117,82 @@ class AsActionStateZeroTest(TestCase):
         self.assertEqual(run.data["priority"], "high")
         self.assertEqual(run.data["status"], "reviewed")
 
+    def test_statezero_action_chains_to_hidden_step(self):
+        """Test that @statezero_action correctly chains to a hidden step (visible=False)"""
+
+        class ActionSerializer(serializers.Serializer):
+            workflow_run_id = serializers.IntegerField()
+            user_choice = serializers.CharField()
+
+        @workflow("hidden_step_chain_workflow")
+        class HiddenStepChainWorkflow:
+            class Context(BaseModel):
+                steps_executed: list = []
+                user_choice: str = ""
+
+            @classmethod
+            def create_context(cls):
+                return cls.Context(steps_executed=[])
+
+            @step(start=True)
+            def start_step(self):
+                
+                self.context.steps_executed.append("start_step")
+                return goto(self.await_user_action)
+
+            @statezero_action(name="user_action", serializer=ActionSerializer)
+            @step()
+            def await_user_action(self, user_choice: str):
+                
+                self.context.steps_executed.append("await_user_action")
+                self.context.user_choice = user_choice
+                return goto(self.hidden_processing)
+
+            @step(visible=False)
+            def hidden_processing(self):
+                """Hidden step that should execute after the action"""
+                
+                self.context.steps_executed.append("hidden_processing")
+                return goto(self.final_step)
+
+            @step()
+            def final_step(self):
+                
+                self.context.steps_executed.append("final_step")
+                return complete()
+
+        # 1. Start the workflow and progress to the action step
+        run = engine.start("hidden_step_chain_workflow")
+        engine.execute_step(run.id, "start_step")
+        run.refresh_from_db()
+
+        # 2. Verify workflow is suspended at action step
+        self.assertEqual(run.current_step, "await_user_action")
+        self.assertEqual(run.status, WorkflowStatus.SUSPENDED.value)
+        self.assertEqual(run.data["steps_executed"], ["start_step"])
+
+        # 3. Call the StateZero action
+        action_url = reverse(
+            "statezero:action",
+            kwargs={"action_name": HiddenStepChainWorkflow.await_user_action._full_action_name}
+        )
+        response = self.client.post(
+            action_url,
+            {"workflow_run_id": run.id, "user_choice": "option_a"},
+            format="json",
+        )
+
+        # 4. Verify response
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # 5. Verify entire chain executed including hidden step
+        run.refresh_from_db()
+        self.assertEqual(run.status, WorkflowStatus.COMPLETED.value)
+        self.assertEqual(
+            run.data["steps_executed"],
+            ["start_step", "await_user_action", "hidden_processing", "final_step"]
+        )
+
     def test_statezero_action_validation_via_statezero(self):
         """Test StateZero validation with @statezero_action"""
 
@@ -138,9 +214,9 @@ class AsActionStateZeroTest(TestCase):
             )
             @step(start=True)
             def set_details(self, amount: float, category: str):
-                ctx = get_context()
-                ctx.amount = amount
-                ctx.category = category
+                
+                self.context.amount = amount
+                self.context.category = category
                 return complete()
 
         # Start workflow, which will immediately suspend at the action step
@@ -179,8 +255,8 @@ class AsActionStateZeroTest(TestCase):
             @statezero_action(name="test_nonexistent_action")
             @step(start=True)
             def test_step(self, data: str):
-                ctx = get_context()
-                ctx.data = data
+                
+                self.context.data = data
                 return complete()
 
         action_url = reverse(
@@ -213,9 +289,9 @@ class AsActionStateZeroTest(TestCase):
             @step(start=True)
             def process_user_action(self, user_action: str, request=None):
                 """Step that uses request parameter"""
-                ctx = get_context()
-                ctx.user_action = user_action
-                ctx.user_authenticated = request is not None
+                
+                self.context.user_action = user_action
+                self.context.user_authenticated = request is not None
                 return complete()
 
         run = engine.start("user_workflow")
@@ -247,8 +323,8 @@ class AsActionStateZeroTest(TestCase):
             @statezero_action(name="simple_action")
             @step(start=True)
             def simple_step(self):
-                ctx = get_context()
-                ctx.executed = True
+                
+                self.context.executed = True
                 return complete()
 
         run = engine.start("no_serializer_workflow")
@@ -301,22 +377,22 @@ class AsActionStateZeroTest(TestCase):
             @statezero_action(name="submit_expense", serializer=SubmitExpenseSerializer)
             @step(start=True)
             def submit_expense(self, amount: str, description: str, category: str):
-                ctx = get_context()
-                ctx.amount = amount
-                ctx.description = description
-                ctx.category = category
+                
+                self.context.amount = amount
+                self.context.description = description
+                self.context.category = category
                 return goto(self.await_manager_review)
 
             @statezero_action(name="manager_review", serializer=ManagerReviewSerializer)
             @step()
             def await_manager_review(self, approved: bool, notes: str = ""):
-                ctx = get_context()
-                ctx.manager_approved = approved
-                ctx.manager_notes = notes
+                
+                self.context.manager_approved = approved
+                self.context.manager_notes = notes
                 if approved:
                     return goto(self.await_finance_processing)
                 else:
-                    ctx.final_status = "rejected"
+                    self.context.final_status = "rejected"
                     return complete()
 
             @statezero_action(
@@ -324,10 +400,10 @@ class AsActionStateZeroTest(TestCase):
             )
             @step()
             def await_finance_processing(self, payment_method: str, processed: bool):
-                ctx = get_context()
-                ctx.payment_method = payment_method
+                
+                self.context.payment_method = payment_method
                 if processed:
-                    ctx.final_status = "paid"
+                    self.context.final_status = "paid"
                     return complete()
                 else:
                     return goto(self.await_finance_processing)  # Stay in same step
@@ -422,10 +498,10 @@ class AsActionStateZeroTest(TestCase):
             )
             @step(start=True)
             def submit_expense(self, amount: str, description: str, category: str):
-                ctx = get_context()
-                ctx.amount = amount
-                ctx.description = description
-                ctx.category = category
+                
+                self.context.amount = amount
+                self.context.description = description
+                self.context.category = category
                 return goto(self.await_manager_review)
 
             @statezero_action(
@@ -433,14 +509,14 @@ class AsActionStateZeroTest(TestCase):
             )
             @step()
             def await_manager_review(self, approved: bool, notes: str = ""):
-                ctx = get_context()
-                ctx.manager_approved = approved
-                ctx.manager_notes = notes
+                
+                self.context.manager_approved = approved
+                self.context.manager_notes = notes
                 if approved:
-                    ctx.final_status = "approved"
+                    self.context.final_status = "approved"
                     return complete()
                 else:
-                    ctx.final_status = "rejected"
+                    self.context.final_status = "rejected"
                     return complete()
 
         # Start the workflow

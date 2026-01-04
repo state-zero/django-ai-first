@@ -15,7 +15,13 @@
       "Bash(pip show:*)",
       "Bash(py manage.py test:*)",
       "Bash(python3 manage.py test:*)",
-      "Bash(where:*)"
+      "Bash(where:*)",
+      "Bash(source:*)",
+      "Bash(ls:*)",
+      "Bash(xargs:*)",
+      "Bash(pip install:*)",
+      "Bash(DJANGO_SETTINGS_MODULE=example_project.settings python:*)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []

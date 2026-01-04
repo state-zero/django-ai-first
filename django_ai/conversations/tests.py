@@ -15,7 +15,7 @@ from django_ai.conversations.models import (
 )
 from django_ai.conversations.base import ConversationAgent
 from django_ai.conversations.registry import register_agent
-from django_ai.conversations.decorators import with_context
+# with_context decorator is deprecated - use self.context directly
 from django_ai.conversations.context import (
     ResponseStream,
     display_widget,
@@ -82,28 +82,23 @@ class FullFeatureTestAgent(ConversationAgent):
             conversation_count=kwargs.get("conversation_count", 5),
         )
 
-    @with_context()
-    def get_user_info(self, user_id: int, user_name: str, conversation_count: int):
-        """Agent function that uses context injection"""
+    def get_user_info(self):
+        """Agent function that uses self.context directly"""
         return {
-            "id": user_id,
-            "name": user_name,
-            "total_conversations": conversation_count,
+            "id": self.context.user_id,
+            "name": self.context.user_name,
+            "total_conversations": self.context.conversation_count,
             "status": "active",
         }
 
-    @with_context()
-    def check_permissions(self, user_id: int, user_name: str):
-        """Another context-injected function"""
-        is_admin = user_name == "integrationtest"  # Our test user
-        return f"User {user_name} ({'admin' if is_admin else 'regular'}) permissions verified"
+    def check_permissions(self):
+        """Another function using self.context"""
+        is_admin = self.context.user_name == "integrationtest"  # Our test user
+        return f"User {self.context.user_name} ({'admin' if is_admin else 'regular'}) permissions verified"
 
     def get_response(self, message, request=None, files=None, **kwargs):
         """Main response handler with clean signature (sync)"""
         print(f"[AGENT] Processing: {message}")
-
-        # Get agent context
-        ctx = self.context
 
         # Parse the message to determine response type
         message_lower = message.lower()
@@ -144,8 +139,8 @@ class FullFeatureTestAgent(ConversationAgent):
 
         else:
             # Default echo response with context update
-            ctx.conversation_count += 1
-            return f"Echo #{ctx.conversation_count}: {message}"
+            self.context.conversation_count += 1
+            return f"Echo #{self.context.conversation_count}: {message}"
 
     def _streaming_response(self, original_message):
         """Generate a streaming-like response with multiple chunks (sync)"""

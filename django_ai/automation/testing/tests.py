@@ -13,7 +13,7 @@ from django_ai.automation.workflows.core import (
     workflow,
     event_workflow,
     step,
-    get_context,
+    
     complete,
     wait_for_event,
     sleep,
@@ -144,16 +144,16 @@ class TestTimeMachineWithWorkflows(TransactionTestCase):
 
             @step(start=True)
             def start(self):
-                ctx = get_context()
-                if not ctx.slept:
-                    ctx.slept = True
+                
+                if not self.context.slept:
+                    self.context.slept = True
                     return sleep(timedelta(minutes=30))
                 return goto(self.after_sleep)
 
             @step()
             def after_sleep(self):
-                ctx = get_context()
-                ctx.woke = True
+                
+                self.context.woke = True
                 return complete()
 
     def test_workflow_sleeps_and_wakes_with_time_advance(self):
@@ -230,26 +230,26 @@ class TestTimeMachineWithWorkflows(TransactionTestCase):
 
             @step(start=True)
             def step1(self):
-                ctx = get_context()
-                if not ctx.slept_step1:
-                    ctx.count = 1
-                    ctx.slept_step1 = True
+                
+                if not self.context.slept_step1:
+                    self.context.count = 1
+                    self.context.slept_step1 = True
                     return sleep(timedelta(seconds=1))
                 return goto(self.step2)
 
             @step()
             def step2(self):
-                ctx = get_context()
-                if not ctx.slept_step2:
-                    ctx.count = 2
-                    ctx.slept_step2 = True
+                
+                if not self.context.slept_step2:
+                    self.context.count = 2
+                    self.context.slept_step2 = True
                     return sleep(timedelta(seconds=1))
                 return goto(self.step3)
 
             @step()
             def step3(self):
-                ctx = get_context()
-                ctx.count = 3
+                
+                self.context.count = 3
                 return complete()
 
         with time_machine() as tm:
@@ -289,24 +289,24 @@ class TestTimeMachineWithWorkflows(TransactionTestCase):
 
             @step(start=True)
             def start(self):
-                ctx = get_context()
-                if not ctx.slept1:
-                    ctx.slept1 = True
+                
+                if not self.context.slept1:
+                    self.context.slept1 = True
                     return sleep(timedelta(hours=1))
                 return goto(self.middle)
 
             @step()
             def middle(self):
-                ctx = get_context()
-                if not ctx.slept2:
-                    ctx.slept2 = True
+                
+                if not self.context.slept2:
+                    self.context.slept2 = True
                     return sleep(timedelta(hours=2))
                 return goto(self.finish)
 
             @step()
             def finish(self):
-                ctx = get_context()
-                ctx.done = True
+                
+                self.context.done = True
                 return complete()
 
         with time_machine() as tm:
@@ -405,8 +405,8 @@ class TestTimeMachineBackgroundLoop(TransactionTestCase):
 
             @step()
             def after(self):
-                ctx = get_context()
-                ctx.woke = True
+                
+                self.context.woke = True
                 return complete()
 
     def test_background_loop_starts_and_stops(self):
@@ -470,8 +470,8 @@ class TestTimeMachineEventWorkflowIntegration(TransactionTestCase):
 
             @step(start=True)
             def start(self):
-                ctx = get_context()
-                ctx.completed = True
+                
+                self.context.completed = True
                 return complete()
 
         with time_machine() as tm:
@@ -540,10 +540,10 @@ class TestTimeMachineEventWorkflowIntegration(TransactionTestCase):
 
             @step(start=True)
             def create_model(self):
-                ctx = get_context()
+                
                 # Create a model that will fire an immediate event
                 obj = ITImmediate.objects.create(flag=True)
-                ctx.created_model_id = obj.id
+                self.context.created_model_id = obj.id
                 created_obj_ids.append(obj.id)
                 return complete()
 
@@ -560,8 +560,8 @@ class TestTimeMachineEventWorkflowIntegration(TransactionTestCase):
 
             @step(start=True)
             def handle(self):
-                ctx = get_context()
-                ctx.handled = True
+                
+                self.context.handled = True
                 return complete()
 
         with time_machine() as tm:
@@ -616,12 +616,12 @@ class TestTimeMachineEventWorkflowIntegration(TransactionTestCase):
 
             @step(start=True)
             def process_and_create_followup(self):
-                ctx = get_context()
-                ctx.processed = True
+                
+                self.context.processed = True
                 # Create a followup scheduled event 30 minutes from now
                 followup_time = timezone.now() + timedelta(minutes=30)
                 followup = ITScheduled.objects.create(due_at=followup_time)
-                ctx.followup_id = followup.id
+                self.context.followup_id = followup.id
                 followup_ids.append(followup.id)
                 return complete()
 
@@ -641,9 +641,9 @@ class TestTimeMachineEventWorkflowIntegration(TransactionTestCase):
 
             @step(start=True)
             def finalize(self):
-                ctx = get_context()
-                ctx.final = True
-                second_handler_completed.append(ctx.entity_id)
+                
+                self.context.final = True
+                second_handler_completed.append(self.context.entity_id)
                 return complete()
 
         with time_machine() as tm:
@@ -757,8 +757,8 @@ class TestTimeMachineDelayedTasks(TransactionTestCase):
 
             @step(start=True)
             def do_work(self):
-                ctx = get_context()
-                ctx.executed = True
+                
+                self.context.executed = True
                 return complete()
 
         with time_machine() as tm:

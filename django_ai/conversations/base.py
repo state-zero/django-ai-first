@@ -83,11 +83,7 @@ class ConversationAgent(ABC):
                 f"{self.__class__.__name__}.Tools.base validation failed: {e}"
             )
 
-    @property
-    def context(self):
-        """Convenient access to current agent context"""
-        from .context import get_context
-        return get_context()
+    # context is set directly by the service: instance.context = loaded_context
 
     @property
     def session(self):

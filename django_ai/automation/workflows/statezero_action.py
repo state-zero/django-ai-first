@@ -7,10 +7,8 @@ from django.shortcuts import get_object_or_404
 from django.core.exceptions import ValidationError
 from .core import (
     engine,
-    get_context,
     _workflows,
-    WorkflowContextManager,
-    _current_context,
+    safe_model_dump,
 )
 from .models import WorkflowRun, WorkflowStatus
 
@@ -105,62 +103,58 @@ def statezero_action(
 
             # Set up workflow context
             workflow_cls = _workflows[workflow_run.name]
-            ctx_manager = WorkflowContextManager(workflow_run_id, workflow_cls.Context)
-            token = _current_context.set(ctx_manager)
 
-            try:
-                # Create workflow instance and call the step method
-                workflow_instance = workflow_cls()
+            # Create workflow instance and hydrate context
+            workflow_instance = workflow_cls()
+            workflow_instance.context = workflow_cls.Context.model_validate(workflow_run.data)
 
-                # Verify step method exists
-                if not hasattr(workflow_instance, step_func.__name__):
-                    logger.error(
-                        f"Step method {step_func.__name__} not found on workflow {workflow_run.name}"
-                    )
-                    raise ValidationError(
-                        f"Step {step_func.__name__} not found on workflow"
-                    )
+            # Verify step method exists
+            if not hasattr(workflow_instance, step_func.__name__):
+                logger.error(
+                    f"Step method {step_func.__name__} not found on workflow {workflow_run.name}"
+                )
+                raise ValidationError(
+                    f"Step {step_func.__name__} not found on workflow"
+                )
 
-                step_method = getattr(workflow_instance, step_func.__name__)
+            step_method = getattr(workflow_instance, step_func.__name__)
 
-                # Get the step function's expected parameters (excluding 'self')
-                step_sig = inspect.signature(step_method)
-                expected_params = {
-                    name
-                    for name, param in step_sig.parameters.items()
-                    if name != "self"
-                }
+            # Get the step function's expected parameters (excluding 'self')
+            step_sig = inspect.signature(step_method)
+            expected_params = {
+                name
+                for name, param in step_sig.parameters.items()
+                if name != "self"
+            }
 
-                # Filter kwargs to only include parameters the step method expects
-                # This includes 'request' if the step method expects it
-                filtered_kwargs = {
-                    key: value
-                    for key, value in kwargs.items()
-                    if key in expected_params
-                }
+            # Filter kwargs to only include parameters the step method expects
+            # This includes 'request' if the step method expects it
+            filtered_kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key in expected_params
+            }
 
-                # Call step with filtered arguments
-                result = step_method(**filtered_kwargs)
+            # Call step with filtered arguments
+            result = step_method(**filtered_kwargs)
 
-                # Commit context changes
-                ctx_manager.commit_changes()
+            # Persist context changes
+            workflow_run.data = safe_model_dump(workflow_instance.context)
+            workflow_run.save()
 
-                # Handle the step result through workflow engine
-                if result is not None:
-                    engine._handle_result(workflow_run, result)
+            # Handle the step result through workflow engine
+            if result is not None:
+                engine._handle_result(workflow_run, result)
 
-                workflow_run.refresh_from_db()
+            workflow_run.refresh_from_db()
 
-                logger.debug(f"Step {step_func.__name__} executed successfully")
-                return {
-                    "status": "success",
-                    "message": f"Step {step_func.__name__} executed",
-                    "workflow_status": str(workflow_run.status),
-                    "current_step": workflow_run.current_step,
-                }
-
-            finally:
-                _current_context.reset(token)
+            logger.debug(f"Step {step_func.__name__} executed successfully")
+            return {
+                "status": "success",
+                "message": f"Step {step_func.__name__} executed",
+                "workflow_status": str(workflow_run.status),
+                "current_step": workflow_run.current_step,
+            }
 
         # Extract workflow class name from the method's qualified name
         # e.g., "ExpenseWorkflow.await_review" -> "ExpenseWorkflow"

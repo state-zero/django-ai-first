@@ -9,9 +9,8 @@ from .models import ConversationWidget
 from ..utils.json import safe_model_dump
 from ..conf import get_pusher_config
 
-# Thread-safe context storage
+# Thread-safe context storage for session and request
 _current_session = ContextVar("current_session", default=None)
-_current_agent_context = ContextVar("current_agent_context", default=None)
 _current_request = ContextVar("current_request", default=None)
 
 
@@ -50,30 +49,6 @@ class ConversationContext:
             )
         except Exception as e:
             print(f"Pusher error: {e}")
-
-
-def get_context():
-    """Get current agent context - auto-setup if needed"""
-    context = _current_agent_context.get()
-    if context is None:
-        # Auto-setup from current session
-        session = _current_session.get()
-        if session:
-            from .registry import registry
-
-            agent_class = registry.get(session.agent_path)
-            context = agent_class.Context(**session.context)
-            _current_agent_context.set(context)
-    return context
-
-
-def _auto_save_context():
-    """Automatically save context changes using safe JSON serialization"""
-    context = _current_agent_context.get()
-    session = _current_session.get()
-    if context and session:
-        session.context = safe_model_dump(context)  # FIX: Use safe serialization
-        session.save()
 
 
 # Utility functions

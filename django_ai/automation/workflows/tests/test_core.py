@@ -13,7 +13,7 @@ from ..core import (
     complete,
     fail,
     engine,
-    get_context,
+    
     WorkflowEngine,
     Retry,
     on_fail,
@@ -98,9 +98,9 @@ class TestBasicWorkflow(WorkflowTestCase):
 
             @step(start=True)
             def increment(self):
-                ctx = get_context()
-                ctx.counter += 1
-                return complete(final_count=ctx.counter)
+                
+                self.context.counter += 1
+                return complete(final_count=self.context.counter)
 
         # Start and execute
         run = engine.start("test_execution")
@@ -129,14 +129,14 @@ class TestBasicWorkflow(WorkflowTestCase):
 
             @step(start=True)
             def first_step(self):
-                ctx = get_context()
-                ctx.visited.append("first")
+                
+                self.context.visited.append("first")
                 return goto(self.second_step)
 
             @step()
             def second_step(self):
-                ctx = get_context()
-                ctx.visited.append("second")
+                
+                self.context.visited.append("second")
                 return complete()
 
         # Start workflow
@@ -276,16 +276,16 @@ class TestWorkflowStates(WorkflowTestCase):
 
             @step(start=True)
             def sleep_step(self):
-                ctx = get_context()
-                if ctx.slept:
+                
+                if self.context.slept:
                     return goto(self.after_sleep)
-                ctx.slept = True
+                self.context.slept = True
                 return sleep(timedelta(minutes=30))
 
             @step()
             def after_sleep(self):
-                ctx = get_context()
-                ctx.completed = True
+                
+                self.context.completed = True
                 return complete()
 
         with time_machine() as tm:
@@ -332,8 +332,8 @@ class TestWorkflowStates(WorkflowTestCase):
 
             @step()
             def after_event_step(self):
-                ctx = get_context()
-                ctx.signal_received = True
+                
+                self.context.signal_received = True
                 return complete()
 
         run = engine.start("test_wait_decorator")
@@ -411,8 +411,8 @@ class TestOnFailHandler(WorkflowTestCase):
             @on_fail
             def cleanup(self, run: WorkflowRun):
                 on_fail_called.append(run.id)
-                ctx = get_context()
-                ctx.cleaned_up = True
+                
+                self.context.cleaned_up = True
 
         run = engine.start("test_on_fail_explicit")
         engine.execute_step(run.id, "failing_step")
@@ -467,7 +467,7 @@ class TestOnFailHandler(WorkflowTestCase):
         self.assertIn("second_step", step_history)
 
     def test_on_fail_has_access_to_context(self):
-        """Test that @on_fail handler can access and modify context via get_context()"""
+        """Test that @on_fail handler can access and modify context via ()"""
 
         @workflow("test_on_fail_context")
         class OnFailContextWorkflow:
@@ -477,14 +477,14 @@ class TestOnFailHandler(WorkflowTestCase):
 
             @step(start=True)
             def update_and_fail(self):
-                ctx = get_context()
-                ctx.value = "updated"
+                
+                self.context.value = "updated"
                 return fail("Failure after update")
 
             @on_fail
             def cleanup(self, run: WorkflowRun):
-                ctx = get_context()
-                ctx.cleanup_value = f"cleaned_{ctx.value}"
+                
+                self.context.cleanup_value = f"cleaned_{self.context.value}"
 
         run = engine.start("test_on_fail_context")
         engine.execute_step(run.id, "update_and_fail")

@@ -13,7 +13,7 @@ from ..workflows.core import (
     workflow,
     event_workflow,
     step,
-    get_context,
+    
     complete,
     wait_for_event,
     sleep,
@@ -94,8 +94,8 @@ class TestEndToEndIntegration(TransactionTestCase):
 
             @step()
             def after(self):
-                ctx = get_context()
-                ctx.got_event = True
+                
+                self.context.got_event = True
                 return complete()
 
         # --- sleeper to test process_scheduled wakeups
@@ -111,16 +111,16 @@ class TestEndToEndIntegration(TransactionTestCase):
 
             @step(start=True)
             def start(self):
-                ctx = get_context()
-                if not ctx.slept_once:
-                    ctx.slept_once = True
+                
+                if not self.context.slept_once:
+                    self.context.slept_once = True
                     return sleep(timedelta(minutes=5))
                 return goto(self.after)
 
             @step()
             def after(self):
-                ctx = get_context()
-                ctx.woke = True
+                
+                self.context.woke = True
                 return complete()
 
     def test_immediate_event_triggers_callbacks_workflows_and_signals_waiters(self):
@@ -494,7 +494,7 @@ class TestDebouncedWorkflows(TransactionTestCase):
 
     def test_debounced_workflow_validation_requires_events_param(self):
         """Workflow with debounce must have create_context(events=...)."""
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(ValueError) as cm:
             @event_workflow(
                 event_name="test_evt",
                 debounce=timedelta(seconds=30),
@@ -511,7 +511,7 @@ class TestDebouncedWorkflows(TransactionTestCase):
                 def start(self):
                     return complete()
 
-        self.assertIn("events", str(ctx.exception))
+        self.assertIn("events", str(cm.exception))
 
     def test_debounced_workflow_accumulates_events(self):
         """Debounced workflow receives all events when it fires."""
@@ -638,8 +638,8 @@ class TestDebouncedHandlers(TransactionTestCase):
         """Handler with debounce must have events parameter."""
         from ..agents.core import agent, handler
 
-        with self.assertRaises(ValueError) as ctx:
-            @agent(name="bad_agent", spawn_on="spawn_evt", match={"id": "{{ ctx.entity_id }}"})
+        with self.assertRaises(ValueError) as cm:
+            @agent(name="bad_agent", spawn_on="spawn_evt", match={"id": "{{ context.entity_id }}"})
             class BadAgent:
                 class Context(BaseModel):
                     entity_id: int
@@ -649,10 +649,10 @@ class TestDebouncedHandlers(TransactionTestCase):
                     return cls.Context(entity_id=event.entity_id)
 
                 @handler("update_evt", debounce=timedelta(seconds=30))
-                def handle_update(self, context):  # Wrong: should have events param
+                def handle_update(self):  # Wrong: should have events param
                     pass
 
-        self.assertIn("events", str(ctx.exception))
+        self.assertIn("events", str(cm.exception))
 
     def test_debounced_handler_accumulates_events(self):
         """Debounced handler receives all events when it fires."""
@@ -665,7 +665,7 @@ class TestDebouncedHandlers(TransactionTestCase):
         @agent(
             name="debounce_handler_agent",
             spawn_on="booking_created",
-            match={"id": "{{ ctx.booking_id }}"}
+            match={"id": "{{ context.booking_id }}"}
         )
         class DebounceHandlerAgent:
             class Context(BaseModel):
@@ -681,9 +681,9 @@ class TestDebouncedHandlers(TransactionTestCase):
                 debounce=timedelta(seconds=30),
                 debounce_key="{entity.id}",
             )
-            def handle_updates(self, context, events):
+            def handle_updates(self, events):
                 received_events.extend(events)
-                context.update_count = len(events)
+                self.context.update_count = len(events)
 
         # Register the handler callbacks
         for h in DebounceHandlerAgent._handlers:

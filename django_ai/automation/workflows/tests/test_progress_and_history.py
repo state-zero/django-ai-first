@@ -13,7 +13,7 @@ from ..core import (
     complete,
     fail,
     engine,
-    get_context,
+    
     Retry,
 )
 from ..models import WorkflowRun, WorkflowStatus, StepType
@@ -110,8 +110,8 @@ class TestProgressHistoryAndStepType(TestCase):
 
             @step()
             def maybe_fail(self):
-                ctx = get_context()
-                if ctx.should_fail:
+                
+                if self.context.should_fail:
                     return fail("Test failure")
                 return sleep(timedelta(hours=1))
 
@@ -157,8 +157,8 @@ class TestProgressHistoryAndStepType(TestCase):
             @statezero_action(name="test_action", serializer=TestSerializer)
             @step()
             def action_step(self, data: str):
-                ctx = get_context()
-                ctx.data = data
+                
+                self.context.data = data
                 return goto(self.automated_step_2)
 
             @step()
@@ -179,17 +179,14 @@ class TestProgressHistoryAndStepType(TestCase):
         self.assertEqual(run.status, WorkflowStatus.SUSPENDED)
 
         # Simulate action completion
-        from ..core import _workflows, WorkflowContextManager, _current_context
+        from ..core import _workflows, safe_model_dump
         workflow_cls = _workflows["step_type_test"]
-        ctx_manager = WorkflowContextManager(run.id, workflow_cls.Context)
-        token = _current_context.set(ctx_manager)
-        try:
-            workflow_instance = workflow_cls()
-            result = workflow_instance.action_step(data="test")
-            ctx_manager.commit_changes()
-            engine._handle_result(run, result)
-        finally:
-            _current_context.reset(token)
+        workflow_instance = workflow_cls()
+        workflow_instance.context = workflow_cls.Context.model_validate(run.data)
+        result = workflow_instance.action_step(data="test")
+        run.data = safe_model_dump(workflow_instance.context)
+        run.save()
+        engine._handle_result(run, result)
 
         run.refresh_from_db()
         self.assertEqual(run.current_step, "automated_step_2")
@@ -245,17 +242,14 @@ class TestProgressHistoryAndStepType(TestCase):
 
         # Action step is suspended, simulate action completion
         self.assertEqual(run.status, WorkflowStatus.SUSPENDED)
-        from ..core import _workflows, WorkflowContextManager, _current_context
+        from ..core import _workflows, safe_model_dump
         workflow_cls = _workflows["step_display_capture_test"]
-        ctx_manager = WorkflowContextManager(run.id, workflow_cls.Context)
-        token = _current_context.set(ctx_manager)
-        try:
-            workflow_instance = workflow_cls()
-            result = workflow_instance.action_step()
-            ctx_manager.commit_changes()
-            engine._handle_result(run, result)
-        finally:
-            _current_context.reset(token)
+        workflow_instance = workflow_cls()
+        workflow_instance.context = workflow_cls.Context.model_validate(run.data)
+        result = workflow_instance.action_step()
+        run.data = safe_model_dump(workflow_instance.context)
+        run.save()
+        engine._handle_result(run, result)
 
         run.refresh_from_db()
         exec3 = run.step_executions.get(step_name="action_step")
@@ -307,16 +301,16 @@ class TestProgressWithTimeMachine(TestCase):
 
             @step()
             def process(self):
-                ctx = get_context()
-                if ctx.slept:
+                
+                if self.context.slept:
                     return goto(self.finalize, progress=0.75)
-                ctx.slept = True
+                self.context.slept = True
                 return sleep(timedelta(hours=2))
 
             @step()
             def finalize(self):
-                ctx = get_context()
-                ctx.completed = True
+                
+                self.context.completed = True
                 return complete()
 
         with time_machine() as tm:
@@ -366,20 +360,20 @@ class TestProgressWithTimeMachine(TestCase):
 
             @step(start=True, title="Start Processing")
             def step_one(self):
-                ctx = get_context()
-                ctx.steps_executed.append("step_one")
+                
+                self.context.steps_executed.append("step_one")
                 return goto(self.step_two, progress=0.33)
 
             @step(title="Continue Processing")
             def step_two(self):
-                ctx = get_context()
-                ctx.steps_executed.append("step_two")
+                
+                self.context.steps_executed.append("step_two")
                 return goto(self.step_three, progress=0.67)
 
             @step(title="Finalize")
             def step_three(self):
-                ctx = get_context()
-                ctx.steps_executed.append("step_three")
+                
+                self.context.steps_executed.append("step_three")
                 return complete()
 
         with time_machine() as tm:

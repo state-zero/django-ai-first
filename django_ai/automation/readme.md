@@ -287,7 +287,7 @@ from django_ai.automation.agents.core import agent, handler, AgentManager
 @agent(
     "reservation_journey",
     spawn_on="reservation_created",
-    match={"id": "{{ ctx.reservation_id }}"},  # How to find existing agent for events
+    match={"id": "{{ context.reservation_id }}"},  # How to find existing agent for events
     singleton=True,                             # One agent per match
 )
 class ReservationJourney:
@@ -336,7 +336,7 @@ The `match` parameter defines how events are routed to agent instances. It maps 
 @agent(
     "guest_support",
     spawn_on="booking_created",
-    match={"guest_id": "{{ ctx.guest_id }}"},  # Entity.guest_id == ctx.guest_id
+    match={"guest_id": "{{ context.guest_id }}"},  # Entity.guest_id == ctx.guest_id
 )
 class GuestSupport:
     class Context(BaseModel):
@@ -350,7 +350,7 @@ class GuestSupport:
 
     # This handler listens to a DIFFERENT entity type (Message vs Booking)
     # The match override tells the system how to find the right agent
-    @handler("message_received", match={"sender_id": "{{ ctx.guest_id }}"})
+    @handler("message_received", match={"sender_id": "{{ context.guest_id }}"})
     def handle_message(self, ctx):
         """Routes messages where message.sender_id == ctx.guest_id"""
         pass
@@ -358,8 +358,8 @@ class GuestSupport:
 
 **Match supports Django ORM syntax:**
 ```python
-match={"guest__id": "{{ ctx.guest_id }}"}     # Traverse relationships
-match={"status__in": "{{ ctx.valid_statuses }}"}  # Use lookups
+match={"guest__id": "{{ context.guest_id }}"}     # Traverse relationships
+match={"status__in": "{{ context.valid_statuses }}"}  # Use lookups
 ```
 
 ### Handler Offsets
@@ -523,7 +523,7 @@ from django_ai.automation.agents.core import agent, handler
 @agent(
     "reservation_agent",
     spawn_on="reservation_created",
-    match={"id": "{{ ctx.reservation_id }}"},
+    match={"id": "{{ context.reservation_id }}"},
 )
 class ReservationAgent:
     class Context(BaseModel):
@@ -590,7 +590,7 @@ Event 3 ──┘
 * Dynamic name: `EventDefinition("task_completed:{{ instance.task_type }}")`
 * Single-step: `@on_event("name") def handler(event): obj = event.entity`
 * Workflow (offsets): `@event_workflow("name", offset=timedelta(...))`
-* Agent: `@agent("name", spawn_on="event", match={"field": "{{ ctx.value }}"})`
+* Agent: `@agent("name", spawn_on="event", match={"field": "{{ context.value }}"})`
 * Handler: `@handler("event", offset=timedelta(...), match={...})`
 * Debounce: `@on_event("name", debounce=timedelta(seconds=30), debounce_key="{entity.id}") def handler(events): ...`
 * Debounced workflow: `@event_workflow("name", debounce=timedelta(...), debounce_key="{entity.id}")` + `create_context(cls, events=...)`

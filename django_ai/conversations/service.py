@@ -35,20 +35,20 @@ class ConversationService:
     def send_message(cls, session_id, message, user=None, request=None, files=None):
         """Process message with clean context separation (sync only)."""
         from .models import ConversationSession, ConversationMessage
-        from .context import _current_session, _current_request, _current_agent_context, _auto_save_context
+        from .context import _current_session, _current_request
+        from ..utils.json import safe_model_dump
 
         session = ConversationSession.objects.get(id=session_id)
 
-        # Set context vars (remember tokens so we can restore them)
+        # Set session/request context vars (for widgets, streaming, etc.)
         sess_token = _current_session.set(session)
-        req_token  = _current_request.set(request)
-        # Reset agent context so it gets re-created for this session
-        ctx_token = _current_agent_context.set(None)
+        req_token = _current_request.set(request)
 
         try:
-            # Create agent instance
+            # Create agent instance and hydrate context
             agent_class = cls.resolve_agent(session.agent_path)
             agent_instance = agent_class()
+            agent_instance.context = agent_class.Context(**session.context)
 
             # Pick callable: method get_response or the instance itself
             call = agent_instance.get_response if hasattr(agent_instance, "get_response") else agent_instance
@@ -56,8 +56,9 @@ class ConversationService:
             # Call synchronously
             response = call(message, request=request, files=files)
 
-            # Save context changes
-            _auto_save_context()
+            # Persist context changes
+            session.context = safe_model_dump(agent_instance.context)
+            session.save()
 
             # Store agent response
             if response is not None:
@@ -65,7 +66,6 @@ class ConversationService:
                     session=session, message_type="agent", content=str(response)
                 )
 
-            session.save()
             return {
                 "status": "success",
                 "response": response,
@@ -73,7 +73,9 @@ class ConversationService:
             }
 
         except Exception as e:
-            _auto_save_context()  # Save context even on error
+            # Persist context even on error
+            session.context = safe_model_dump(agent_instance.context)
+            session.save()
             ConversationMessage.objects.create(
                 session=session, message_type="system", content=f"Error: {str(e)}"
             )
@@ -83,4 +85,3 @@ class ConversationService:
             # Restore original context values
             _current_session.reset(sess_token)
             _current_request.reset(req_token)
-            _current_agent_context.reset(ctx_token)
